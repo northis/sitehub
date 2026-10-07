@@ -1,0 +1,63 @@
+# Traefik static configuration for the SiteHub entry container.
+# Instance-specific values are interpolated from the environment (.env).
+
+entryPoints:
+  # Plain HTTP: everything is redirected to HTTPS.
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  # HTTPS: TLS defaults apply to every router, so site containers
+  # need no TLS labels at all. One wildcard certificate covers all
+  # single-level subdomains of DOMAIN.
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: le
+        domains:
+          - main: "*.${DOMAIN}"
+            sans:
+              - "${DOMAIN}"
+        # HSTS: one year, include subdomains, no preload
+        # (preload would lock down subdomains that may not serve HTTPS yet).
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: false
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    # Only containers with explicit traefik.* labels are routed.
+    exposedByDefault: false
+
+certificatesResolvers:
+  le:
+    acme:
+      email: "${LE_EMAIL}"
+      storage: "/letsencrypt/acme.json"
+      caServer: "${LE_CA_SERVER}"
+      # Wildcard certificates require DNS-01; Cloudflare records are
+      # created via API using CF_DNS_API_TOKEN from the environment.
+      dnsChallenge:
+        provider: cloudflare
+        delayBeforeCheck: 10
+        resolvers:
+          - "1.1.1.1:53"
+
+# Health endpoint for `traefik healthcheck --ping` (default entryPoint :8080,
+# container-internal only).
+ping: {}
+
+# Dashboard is disabled; enable it only behind BasicAuth (see README).
+api:
+  dashboard: false
+
+log:
+  level: INFO
+
+accessLog: {}

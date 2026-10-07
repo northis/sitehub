@@ -1,0 +1,49 @@
+# SiteHub entry container: Traefik reverse proxy with automatic
+# Let's Encrypt wildcard certificates (Cloudflare DNS-01).
+#
+# Instance-specific values come from .env (see .env.example).
+# The "proxy" network must exist before starting: docker network create proxy
+# (scripts/install.sh does this for you).
+
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Read-only Docker socket for container auto-discovery.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Static configuration.
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # ACME storage (wildcard certificate + account key); survives
+      # container re-creation.
+      - letsencrypt:/letsencrypt
+    environment:
+      DOMAIN: ${DOMAIN}
+      LE_EMAIL: ${LE_EMAIL}
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+      LE_CA_SERVER: ${LE_CA_SERVER}
+      TZ: ${TZ}
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  letsencrypt:

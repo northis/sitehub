@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SiteHub stub site</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6; }
+    code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>SiteHub stub site is live</h1>
+  <p>You reached <strong id="host">(loading...)</strong> over HTTPS through the Traefik entry container.</p>
+  <p>If you can read this page, then auto-discovery, the wildcard Let's Encrypt certificate, and subdomain routing all work.</p>
+  <p>Next step: deploy your own site following the same pattern &mdash; join the external <code>proxy</code> network and add the three Traefik labels (see the SiteHub README).</p>
+  <script>document.getElementById("host").textContent = window.location.hostname;</script>
+</body>
+</html>

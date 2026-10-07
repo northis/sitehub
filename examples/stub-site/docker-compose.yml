@@ -1,0 +1,27 @@
+# Example site for SiteHub: the reference implementation of the
+# site connection contract (external "proxy" network + Traefik labels).
+#
+# Deploy with (from this directory):
+#   DOMAIN=<your-domain> docker compose up -d
+# Then open https://stub.<your-domain>/
+#
+# Note: no "ports" section - all external traffic arrives via Traefik.
+
+services:
+  stub-site:
+    image: nginx:alpine
+    container_name: stub-site
+    restart: unless-stopped
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+    networks:
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "proxy"
+      traefik.http.routers.stub.rule: "Host(`stub.${DOMAIN}`)"
+      traefik.http.services.stub.loadbalancer.server.port: "80"
+
+networks:
+  proxy:
+    external: true
