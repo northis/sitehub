@@ -1,0 +1,28 @@
+# Example site for SiteHub: the reference implementation of the VPN site
+# connection contract (a site hosted on a Windows machine over SoftEther VPN).
+#
+# Deploy with (from this directory):
+#   docker compose up -d
+# Then route https://site1.<your-domain>/ to http://10.77.77.21:8080 in
+# traefik/dynamic/vpn-sites.yml on the Ubuntu server.
+#
+# The port is published on all interfaces - do NOT bind to 127.0.0.1,
+# otherwise the site is unreachable from the VPN: Traefik connects to the
+# host's fixed VPN address, not to localhost.
+#
+# Allow inbound traffic to this port from the VPN tap address only, e.g.
+# in an elevated PowerShell:
+#   New-NetFirewallRule -Name "SiteHub-VPN-Site1" `
+#     -DisplayName "SiteHub: site1 from VPN" `
+#     -Direction Inbound -Action Allow -Protocol TCP `
+#     -LocalPort 8080 -RemoteAddress 10.77.77.1 -Profile Any
+
+services:
+  site1:
+    image: nginx:alpine
+    container_name: vpn-site1
+    restart: unless-stopped
+    ports:
+      - "8080:80"  # on all interfaces; not 127.0.0.1
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro

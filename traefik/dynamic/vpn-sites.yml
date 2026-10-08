@@ -1,0 +1,21 @@
+# Dynamic routes for VPN sites: sites hosted behind the SoftEther VPN
+# instead of the Docker network. Traefik watches this directory, so
+# changes apply without a restart.
+#
+# Each site needs one router and one service with the same name; names
+# and Host(...) values must be unique on the server, and the host is a
+# single-level subdomain of DOMAIN. TLS and the HTTP -> HTTPS redirect
+# come from the entrypoint defaults, so no TLS options are needed here.
+#
+# Example (uncomment and adjust):
+#
+# http:
+#   routers:
+#     site1-vpn:
+#       rule: "Host(`site1.foodomain.com`)"
+#       service: site1-vpn
+#   services:
+#     site1-vpn:
+#       loadBalancer:
+#         servers:
+#           - url: "http://10.77.77.21:8080"

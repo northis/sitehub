@@ -1,0 +1,28 @@
+# SoftEther VPN server: the only container of the VPN variant.
+# Run from this directory: docker compose up -d
+#
+# Host networking, NET_ADMIN and /dev/net/tun are required for the
+# local bridge between the REMOTE hub and the host tap interface.
+# Hub and user configuration is stored in ./data and survives
+# container re-creation.
+
+services:
+  softether:
+    image: softethervpn/vpnserver:5.2.5188
+    container_name: softether
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      # Hub and user configuration (persistent state).
+      - ./data:/var/lib/softether
+      # Server logs.
+      - ./logs:/var/log/softether
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

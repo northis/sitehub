@@ -1,0 +1,14 @@
+[Unit]
+Description=SiteHub VPN host firewall rules (tap_vpn)
+# The DOCKER-USER chain only exists once Docker is running, so apply
+# the rules after docker.service starts.
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sitehub-vpn-net up
+ExecStop=/usr/local/sbin/sitehub-vpn-net down
+
+[Install]
+WantedBy=multi-user.target

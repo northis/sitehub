@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SiteHub VPN site</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6; }
+    code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>SiteHub VPN site is live</h1>
+  <p>You reached <strong id="host">(loading...)</strong> over HTTPS through the Traefik entry container.</p>
+  <p>This page is served by a container on a Windows host and published over the SoftEther VPN: Traefik proxies the request to the host's fixed VPN address, so the site itself needs no TLS and no port forwarding on the router.</p>
+  <p>If you can read this page, then the VPN connection, the Windows Firewall rule and the <code>vpn-sites.yml</code> route all work.</p>
+  <script>document.getElementById("host").textContent = window.location.hostname;</script>
+</body>
+</html>

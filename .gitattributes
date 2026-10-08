@@ -1,4 +1,6 @@
 # Enforce Unix line endings: these files are consumed on the Ubuntu server
 *.sh text eol=lf
 *.yml text eol=lf
+*.yaml text eol=lf
 .env.example text eol=lf
+softether/systemd/* text eol=lf

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Host tap interface for the SoftEther local bridge.
+#
+# The SoftEther container opens tap_vpn for the REMOTE hub; the interface
+# must exist before Docker starts, so it is created by a systemd unit
+# ordered before docker.service.
+#
+# Idempotent: creating an existing interface or address is a no-op.
+#
+# Usage: sitehub-vpn-tap up|down
+
+set -euo pipefail
+
+tap_up() {
+  if ! ip link show dev tap_vpn >/dev/null 2>&1; then
+    ip tuntap add dev tap_vpn mode tap
+  fi
+  ip link set tap_vpn mtu 1400 up
+  local addr_line
+  addr_line="$(ip -o -4 addr show dev tap_vpn || true)"
+  if [[ "$addr_line" != *"inet 10.77.77.1/24 "* ]]; then
+    ip addr add 10.77.77.1/24 dev tap_vpn
+  fi
+}
+
+tap_down() {
+  if ip link show dev tap_vpn >/dev/null 2>&1; then
+    ip link delete tap_vpn
+  fi
+}
+
+usage() {
+  printf 'Usage: %s up|down\n' "$(basename "$0")" >&2
+}
+
+case "${1:-}" in
+  up)
+    tap_up
+    ;;
+  down)
+    tap_down
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

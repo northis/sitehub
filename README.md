@@ -23,11 +23,16 @@
 ```
 ├── docker-compose.yml      # входной контейнер traefik
 ├── traefik/traefik.yml     # статическая конфигурация Traefik
+├── traefik/dynamic/        # маршруты VPN-сайтов (file provider, hot-reload)
+├── softether/              # VPN-сервер SoftEther (compose, systemd-юниты, шаблон секретов)
 ├── .env.example            # шаблон настроек (секреты — в .env, не в git)
 ├── scripts/
 │   ├── install.sh          # идемпотентная установка на Ubuntu
-│   └── check.sh            # диагностика (read-only)
-└── examples/stub-site/     # сайт-заглушка для проверки
+│   ├── check.sh            # диагностика (read-only)
+│   ├── install-vpn.sh      # идемпотентная установка варианта «сайты за VPN»
+│   └── check-vpn.sh        # диагностика VPN-варианта (read-only)
+├── examples/stub-site/     # сайт-заглушка для проверки
+└── examples/vpn-site-windows/  # эталон сайта на Windows за VPN
 ```
 
 ## Требования
@@ -145,6 +150,241 @@ DOMAIN=ваш-домен docker compose up -d
 сертификатом; `http://` редиректит на `https://`. Удаление примера:
 `docker compose down` из каталога `examples/stub-site`.
 
+## Сайты за VPN (SoftEther)
+
+Вариант для сайтов, которые работают на Windows-машине за NAT (например, за
+MikroTik): машина подключается к SoftEther-серверу на Ubuntu исходящим
+соединением, получает постоянный адрес в VPN `10.77.77.0/24`, а Traefik
+маршрутизирует к её сайтам через туннель. Сайты на Ubuntu продолжают работать
+как раньше — варианты не конфликтуют.
+
+```
+Windows (за NAT)                      Ubuntu (публичный IP)
+┌───────────────────┐                ┌─────────────────────────────────────┐
+│ SoftEther Client  │ ── TCP/8443 ─▶ │ softether: хаб REMOTE, local bridge │
+│ 10.77.77.21       │ ◀── VPN (L2) ─ │ tap_vpn 10.77.77.1/24               │
+│ Docker Desktop    │                │ traefik → vpn-sites.yml             │
+│ site1 :8080       │ ◀───────────── │   http://10.77.77.21:8080           │
+└───────────────────┘                └─────────────────────────────────────┘
+```
+
+### Установка на Ubuntu
+
+На сервере с уже установленным SiteHub:
+
+```bash
+sudo ./scripts/install-vpn.sh
+```
+
+Скрипт **идемпотентен**: каждый шаг пропускается, если уже выполнен. Что он делает:
+
+1. **Preflight** (до изменений): root, Docker, docker-сеть `proxy`, свободный порт
+   `8443/tcp` (занят — выход с именем процесса; при работающем контейнере
+   `softether` — SKIP).
+2. **Секреты**: создаёт `softether/.env` (права 600, в git не попадает; шаблон —
+   `softether/.env.example`) и **один раз** печатает сгенерированный пароль
+   `VPN_USER_PASSWORD` — сохраните его для Windows.
+3. **systemd-юниты**: `sitehub-vpn-tap.service` создаёт `tap_vpn`
+   (`10.77.77.1/24`, MTU 1400) до старта Docker; `sitehub-vpn-net.service`
+   добавляет правила iptables после старта Docker. Скрипты ставятся в
+   `/usr/local/sbin/`, юниты — в `/etc/systemd/system/`.
+4. **Firewall**: `ufw allow 8443/tcp` (только добавление).
+5. **SoftEther**: хаб `REMOTE`, пользователь `site1` с адресом `10.77.77.21`,
+   SecureNAT с DHCP (`10.77.77.100–200`), единственный TCP-слушатель `8443`
+   (443/992/1194/5555 удалены), UDP выключен; сертификат сервера сохраняется в
+   `softether/data/server.cer`.
+6. **Мост**: контейнер `softether` (host net, `restart: unless-stopped`,
+   `softether/compose.yaml`) и local bridge `REMOTE ↔ tap_vpn`.
+
+Если Traefik установлен до появления file provider, один раз примените изменения
+входного контейнера (ro-монтирование `traefik/dynamic`):
+
+```bash
+docker compose up -d
+```
+
+Добавление ещё одного сайта-хоста (например, второй Windows-машины): адрес —
+внутри `10.77.77.0/24`, вне DHCP-пула `10.77.77.100–200`, не `.1` и не `.254`:
+
+```bash
+sudo ./scripts/install-vpn.sh add-user site2 10.77.77.22
+```
+
+Скрипт напомнит добавить маршрут в `traefik/dynamic/vpn-sites.yml`.
+
+### Настройка Windows
+
+1. Установите **SoftEther VPN Client** и создайте подключение (**New Connection
+   Setting**):
+   - **Host Name** — `IP-сервера`, **Port Number** — `8443`;
+   - **Virtual Hub Name** — `REMOTE`;
+   - **User Name** — `site1`, **Password** — `VPN_USER_PASSWORD` из вывода
+     `install-vpn.sh` (или из `softether/.env`).
+2. **Сертификат сервера (pinning)**: скопируйте `softether/data/server.cer` с
+   Ubuntu на Windows; в свойствах подключения включите **Always Verify Server
+   Certificate** и зарегистрируйте перенесённый сертификат через **Specify
+   Individual Cert**. Сертификат самоподписанный — отключать проверку не следует,
+   pinning защищает от подмены сервера.
+3. **Ускорение UDP — выключить**: в **Advanced Settings** включите флаг
+   **Disable UDP Acceleration** (по умолчанию флаг снят, ускорение разрешено).
+4. **Автоподключение**: выберите подключение в VPN Client Manager и нажмите
+   **Set as Startup Connection** в меню **Connect**; при необходимости включите
+   **Reconnection Endless (Keep VPN Session Always)**.
+5. Проверьте, что SoftEther-адаптер получил адрес `10.77.77.21` (DHCP по note
+   пользователя); шлюз и DNS клиенту не выдаются.
+
+**Docker Desktop.** Сайты — обычные контейнеры, но порт должен публиковаться на
+**все интерфейсы**, а не на `127.0.0.1`: Traefik подключается к адресу
+`10.77.77.21`, а не к localhost Windows-машины. Готовый пример —
+`examples/vpn-site-windows/`:
+
+```yaml
+services:
+  site1:
+    image: nginx:alpine
+    container_name: vpn-site1
+    restart: unless-stopped
+    ports:
+      - "8080:80"          # на все интерфейсы; не 127.0.0.1
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+```
+
+Деплой (из каталога примера на Windows):
+
+```bash
+docker compose up -d
+```
+
+**Windows Firewall.** Разрешите входящие на порт сайта только с `10.77.77.1`
+(адрес tap после MASQUERADE на Ubuntu) — в PowerShell от администратора:
+
+```powershell
+New-NetFirewallRule `
+  -Name "SiteHub-VPN-Site1" `
+  -DisplayName "SiteHub: site1 from VPN" `
+  -Direction Inbound -Action Allow -Protocol TCP `
+  -LocalPort 8080 `
+  -RemoteAddress 10.77.77.1 `
+  -Profile Any
+```
+
+**Автозапуск.** VPN-клиент поднимает стартовое подключение при загрузке Windows;
+Docker Desktop запускается только после входа пользователя, поэтому включите
+автологин. Альтернатива — Docker Engine в WSL2 (запускается как служба, без
+Docker Desktop).
+
+### Маршрут в Traefik
+
+На Ubuntu добавьте запись в `traefik/dynamic/vpn-sites.yml` — файл смонтирован в
+Traefik ro, `watch: true` подхватывает изменения без перезапуска:
+
+```yaml
+http:
+  routers:
+    site1-vpn:
+      rule: "Host(`site1.ваш-домен`)"
+      service: site1-vpn
+  services:
+    site1-vpn:
+      loadBalancer:
+        servers:
+          - url: "http://10.77.77.21:8080"
+```
+
+Правила:
+
+- имя роутера и сервиса (`site1-vpn`) должно быть уникальным на сервере;
+- значение `Host(...)` уникально; поддомен — один уровень (`site1.ваш-домен` —
+  да, `a.b.ваш-домен` — нет);
+- TLS и редирект HTTP→HTTPS наследуются с entrypoint — отдельные TLS-настройки
+  не нужны;
+- сайты на одном Windows-хосте используют один адрес (`10.77.77.21`) и разные
+  порты.
+
+### Проверка
+
+С Ubuntu — доступность сайта внутри VPN:
+
+```bash
+curl -sS http://10.77.77.21:8080/ -o /dev/null -w '%{http_code}\n'    # ожидание: 200
+```
+
+Снаружи — через Traefik:
+
+```bash
+curl -sS https://site1.ваш-домен/ -o /dev/null -w '%{http_code} %{ssl_verify_result}\n'    # ожидание: 200 0
+```
+
+Общая диагностика VPN-варианта (read-only, код 1 при FAIL):
+
+```bash
+sudo ./scripts/check-vpn.sh
+```
+
+### Диагностика
+
+`check-vpn.sh` проверяет контейнер `softether`, `tap_vpn` и адрес, local bridge,
+слушатель `8443`, правила iptables, ufw, сессии/DHCP и доступность сайтов из
+`traefik/dynamic/vpn-sites.yml`; каждая строка — `OK`/`WARN`/`FAIL` с подсказкой.
+
+Логи:
+
+```bash
+docker logs softether    # сервер, мост, подключения клиентов
+docker logs traefik      # маршрутизация и ошибки в vpn-sites.yml
+```
+
+Сессии и выдачи DHCP внутри контейнера (hub-команды, пароль — `VPN_HUB_PASSWORD`
+из `softether/.env`):
+
+```bash
+sudo docker exec softether vpncmd localhost:8443 /SERVER /HUB:REMOTE /PASSWORD:'<пароль хаба>' /CMD:"SessionList"
+sudo docker exec softether vpncmd localhost:8443 /SERVER /HUB:REMOTE /PASSWORD:'<пароль хаба>' /CMD:"DhcpTable"
+```
+
+### Обновление
+
+```bash
+docker compose -f softether/compose.yaml pull && docker compose -f softether/compose.yaml up -d
+```
+
+Повторный `sudo ./scripts/install-vpn.sh` также идемпотентен и не затрагивает
+Ubuntu-сайты.
+
+### Откат
+
+```bash
+# 1. Остановить и удалить контейнер SoftEther:
+docker compose -f softether/compose.yaml down
+
+# 2. Остановить юниты: их ExecStop снимет правила iptables и удалит tap_vpn:
+sudo systemctl disable --now sitehub-vpn-tap.service sitehub-vpn-net.service
+
+# 3. Удалить юниты и скрипты:
+sudo rm /etc/systemd/system/sitehub-vpn-tap.service /etc/systemd/system/sitehub-vpn-net.service
+sudo rm /usr/local/sbin/sitehub-vpn-tap /usr/local/sbin/sitehub-vpn-net
+sudo systemctl daemon-reload
+
+# 4. Закрыть порт:
+sudo ufw delete allow 8443/tcp
+```
+
+Если юниты уже удалены, а правила или `tap_vpn` остались, удалите их вручную:
+
+```bash
+sudo iptables -D DOCKER-USER -i tap_vpn -j ACCEPT
+sudo iptables -D DOCKER-USER -o tap_vpn -j ACCEPT
+sudo iptables -t nat -D POSTROUTING -s <подсеть proxy> -d 10.77.77.0/24 -o tap_vpn -j MASQUERADE
+sudo iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -o tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+sudo iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -i tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+sudo ip link del tap_vpn
+```
+
+Удалите (или закомментируйте) записи VPN-сайтов в `traefik/dynamic/vpn-sites.yml`.
+Ubuntu-сайты при откате не затрагиваются; файлы `softether/.env`, `softether/data/`,
+`softether/logs/` можно удалить, если вариант больше не нужен.
+
 ## Дашборд Traefik (опционально)
 
 По умолчанию дашборд выключен. Чтобы включить его **только за BasicAuth**:
@@ -188,7 +428,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 ```
 
 Переход на новую мажорную версию Traefik выполняйте осознанно, по
-[миграционному гайду](https://doc.traefik.io/traefik/migration/).
+[миграционному гайду](https://doc.traefik.io/traefik\/migration/).
 
 ## Troubleshooting
 
@@ -202,6 +442,12 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | Сайт отдаёт 503 | Контейнер сайта не запущен или не отвечает на указанном в метке порту: `docker ps`, `docker logs <сайт>` |
 | Два сайта конфликтуют | Дубль значения `Host(...)` в метках: найдите `docker inspect` обоих и исправьте; конфликт виден в `docker logs traefik` |
 | После reboot что-то не поднялось | Не должно случаться: Docker включён на boot, traefik — `restart: unless-stopped`. Проверьте `./scripts/check.sh` и `docker ps -a` |
+| Windows-машина offline или VPN отвалился | 503 только на её сайтах — это штатно, Ubuntu-сайты работают. Проверьте питание/сон Windows-машины и автоподключение VPN |
+| Сайт на Windows недоступен из VPN | Порт опубликован на `127.0.0.1` — в compose сайта укажите `ports: "8080:80"` (все интерфейсы) |
+| Сайт на Windows недоступен из VPN (порт опубликован) | Windows Firewall блокирует входящие: добавьте правило для порта с `-RemoteAddress 10.77.77.1` (см. раздел «Сайты за VPN (SoftEther)») |
+| DHCP не выдал адрес VPN-адаптеру | Задайте статический адрес на SoftEther-адаптере: `10.77.77.21`, маска `255.255.255.0`, шлюз и DNS не указывать |
+| Крупные файлы через VPN-сайт загружаются медленно или обрываются | MTU/фрагментация в туннеле: `tap_vpn` — 1400, MSS clamp включён; при проблемах уменьшите MTU адаптера на Windows |
+| После `systemctl restart docker` VPN-сайты отдают 503 | Правила iptables потеряны: `sudo systemctl restart sitehub-vpn-net.service`; проверка — `sudo ./scripts/check-vpn.sh` |
 
 ## Приёмочный чек-лист
 

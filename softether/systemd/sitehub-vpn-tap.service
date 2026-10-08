@@ -1,0 +1,14 @@
+[Unit]
+Description=SiteHub VPN tap interface (tap_vpn)
+# The SoftEther local bridge needs the tap interface before the
+# container starts, so create it before Docker.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sitehub-vpn-tap up
+ExecStop=/usr/local/sbin/sitehub-vpn-tap down
+
+[Install]
+WantedBy=multi-user.target

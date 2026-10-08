@@ -4,3 +4,8 @@
 .env
 .env.*
 !.env.example
+
+# SoftEther VPN: secrets and runtime state
+softether/.env
+softether/data/
+softether/logs/

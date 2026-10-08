@@ -18,6 +18,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Static configuration.
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # Dynamic routes for VPN sites (file provider); hot-reloaded.
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
       # ACME storage (wildcard certificate + account key); survives
       # container re-creation.
       - letsencrypt:/letsencrypt

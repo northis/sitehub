@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Host iptables rules for VPN site traffic.
+#
+# Allows traffic between the Docker proxy network and the VPN segment
+# through tap_vpn, masquerades proxy subnets towards VPN clients, and
+# clamps TCP MSS on the tunnel.
+#
+# Idempotent: every rule is added or removed only when its exact
+# specification is absent or present. When the proxy network does not
+# exist yet, MASQUERADE rules are skipped with a warning instead of
+# failing, so the unit can be restarted after the network appears.
+#
+# Usage: sitehub-vpn-net up|down
+
+set -euo pipefail
+
+PROXY_NETWORK=proxy
+
+warn() {
+  printf 'WARNING: %s\n' "$*" >&2
+}
+
+# Fill the global array PROXY_SUBNETS with the subnets of the proxy
+# network; return non-zero when the network does not exist.
+PROXY_SUBNETS=()
+load_proxy_subnets() {
+  if ! docker network inspect "$PROXY_NETWORK" >/dev/null 2>&1; then
+    return 1
+  fi
+  local subnets_raw
+  subnets_raw="$(docker network inspect "$PROXY_NETWORK" --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}')"
+  read -r -a PROXY_SUBNETS <<< "$subnets_raw"
+}
+
+ensure_accept_rules() {
+  if ! iptables -C DOCKER-USER -i tap_vpn -j ACCEPT 2>/dev/null; then
+    iptables -I DOCKER-USER 1 -i tap_vpn -j ACCEPT
+  fi
+  if ! iptables -C DOCKER-USER -o tap_vpn -j ACCEPT 2>/dev/null; then
+    iptables -I DOCKER-USER 1 -o tap_vpn -j ACCEPT
+  fi
+}
+
+remove_accept_rules() {
+  if iptables -C DOCKER-USER -i tap_vpn -j ACCEPT 2>/dev/null; then
+    iptables -D DOCKER-USER -i tap_vpn -j ACCEPT
+  fi
+  if iptables -C DOCKER-USER -o tap_vpn -j ACCEPT 2>/dev/null; then
+    iptables -D DOCKER-USER -o tap_vpn -j ACCEPT
+  fi
+}
+
+ensure_masquerade_rules() {
+  if ! load_proxy_subnets; then
+    warn "docker network '${PROXY_NETWORK}' does not exist; skipping MASQUERADE rules (restart this service once it exists)"
+    return 0
+  fi
+  local subnet
+  for subnet in "${PROXY_SUBNETS[@]}"; do
+    if ! iptables -t nat -C POSTROUTING -s "$subnet" -d 10.77.77.0/24 -o tap_vpn -j MASQUERADE 2>/dev/null; then
+      iptables -t nat -A POSTROUTING -s "$subnet" -d 10.77.77.0/24 -o tap_vpn -j MASQUERADE
+    fi
+  done
+}
+
+remove_masquerade_rules() {
+  if ! load_proxy_subnets; then
+    warn "docker network '${PROXY_NETWORK}' does not exist; skipping MASQUERADE cleanup"
+    return 0
+  fi
+  local subnet
+  for subnet in "${PROXY_SUBNETS[@]}"; do
+    if iptables -t nat -C POSTROUTING -s "$subnet" -d 10.77.77.0/24 -o tap_vpn -j MASQUERADE 2>/dev/null; then
+      iptables -t nat -D POSTROUTING -s "$subnet" -d 10.77.77.0/24 -o tap_vpn -j MASQUERADE
+    fi
+  done
+}
+
+ensure_mss_rules() {
+  if ! iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -o tap_vpn -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+    iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -o tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+  fi
+  if ! iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -i tap_vpn -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+    iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -i tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+  fi
+}
+
+remove_mss_rules() {
+  if iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -o tap_vpn -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -o tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+  fi
+  if iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -i tap_vpn -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -i tap_vpn -j TCPMSS --clamp-mss-to-pmtu
+  fi
+}
+
+net_up() {
+  ensure_accept_rules
+  ensure_masquerade_rules
+  ensure_mss_rules
+}
+
+net_down() {
+  remove_accept_rules
+  remove_masquerade_rules
+  remove_mss_rules
+}
+
+usage() {
+  printf 'Usage: %s up|down\n' "$(basename "$0")" >&2
+}
+
+case "${1:-}" in
+  up)
+    net_up
+    ;;
+  down)
+    net_down
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -34,6 +34,11 @@ providers:
     endpoint: "unix:///var/run/docker.sock"
     # Only containers with explicit traefik.* labels are routed.
     exposedByDefault: false
+  # Dynamic routes for VPN sites: Traefik watches the mounted
+  # directory and applies changes without a restart.
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
 
 certificatesResolvers:
   le:
