@@ -23,11 +23,12 @@ entryPoints:
           - main: "*.${DOMAIN}"
             sans:
               - "${DOMAIN}"
-        # HSTS: one year, include subdomains, no preload
-        # (preload would lock down subdomains that may not serve HTTPS yet).
-        stsSeconds: 31536000
-        stsIncludeSubdomains: true
-        stsPreload: false
+      # HSTS and other security headers are defined as a headers
+      # middleware in the dynamic config (security-headers.yml) and
+      # prepended to every router on this entryPoint, so site
+      # containers need no labels for them either.
+      middlewares:
+        - security-headers@file
 
 providers:
   docker:

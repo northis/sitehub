@@ -1,0 +1,16 @@
+# Security headers for every site served by Traefik.
+#
+# Attached to the websecure entryPoint in traefik.yml
+# (entryPoints.websecure.http.middlewares), so site containers need
+# no labels for these headers. Traefik watches this directory, so
+# changes apply without a restart.
+
+http:
+  middlewares:
+    security-headers:
+      headers:
+        # HSTS: one year, include subdomains, no preload
+        # (preload would lock down subdomains that may not serve HTTPS yet).
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: false

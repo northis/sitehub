@@ -23,7 +23,7 @@
 ```
 ├── docker-compose.yml      # входной контейнер traefik
 ├── traefik/traefik.yml     # статическая конфигурация Traefik
-├── traefik/dynamic/        # маршруты VPN-сайтов (file provider, hot-reload)
+├── traefik/dynamic/        # маршруты VPN-сайтов и security-заголовки (file provider, hot-reload)
 ├── softether/              # VPN-сервер SoftEther (compose, systemd-юниты, шаблон секретов)
 ├── .env.example            # шаблон настроек (секреты — в .env, не в git)
 ├── scripts/
@@ -49,8 +49,9 @@
 ## Установка
 
 ```bash
-git clone <url-этого-репозитория> SiteHub
-cd SiteHub
+git clone https://github.com/northis/sitehub
+cd sitehub
+chmod +x ./scripts/install.sh
 sudo ./scripts/install.sh
 ```
 
@@ -114,6 +115,7 @@ networks:
 
 - валидный wildcard-сертификат Let's Encrypt (автопродление, действий не требует);
 - редирект всех HTTP-запросов на HTTPS (301/308);
+- HSTS (`Strict-Transport-Security`: год, включая поддомены) на всех сайтах;
 - заголовки `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`,
   `X-Forwarded-Port` — приложение должно их учитывать (например, для https-ссылок);
 - 503, пока контейнер сайта не запущен, и автоматическое восстановление после запуска.
