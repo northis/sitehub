@@ -1,0 +1,14 @@
+# Bootstrap router: makes Traefik request the wildcard certificate at
+# startup, before the first site is deployed (Traefik requests certificates
+# only when at least one router exists on the websecure entryPoint).
+#
+# The router matches an internal path only and answers with 418 via the
+# built-in noop@internal service, so it does not affect sites or the apex
+# domain. Remove this file if you prefer the certificate to be requested
+# with the first deployed site instead.
+http:
+  routers:
+    sitehub-bootstrap:
+      rule: "Path(`/.sitehub-bootstrap`)"
+      entryPoints: [websecure]
+      service: noop@internal

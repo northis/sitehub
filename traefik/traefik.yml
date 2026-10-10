@@ -1,5 +1,6 @@
-# Traefik static configuration for the SiteHub entry container.
-# Instance-specific values are interpolated from the environment (.env).
+# Traefik static configuration template for the SiteHub entry container.
+# Values in ${...} are substituted from the environment (.env) at container
+# start by traefik/render-config.sh (Traefik itself does not expand them).
 
 entryPoints:
   # Plain HTTP: everything is redirected to HTTPS.
@@ -51,7 +52,10 @@ certificatesResolvers:
       # created via API using CF_DNS_API_TOKEN from the environment.
       dnsChallenge:
         provider: cloudflare
-        delayBeforeCheck: 10
+        # Delay before checking DNS propagation (replaces the deprecated
+        # delayBeforeCheck option).
+        propagation:
+          delayBeforeChecks: 10s
         resolvers:
           - "1.1.1.1:53"
 

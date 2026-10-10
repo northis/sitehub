@@ -22,8 +22,8 @@
 
 ```
 ├── docker-compose.yml      # входной контейнер traefik
-├── traefik/traefik.yml     # статическая конфигурация Traefik
-├── traefik/dynamic/        # маршруты VPN-сайтов и security-заголовки (file provider, hot-reload)
+├── traefik/traefik.yml     # шаблон статической конфигурации (рендерится при старте)
+├── traefik/dynamic/        # bootstrap-роутер, security-заголовки, VPN-маршруты (hot-reload)
 ├── softether/              # VPN-сервер SoftEther (compose, systemd-юниты, шаблон секретов)
 ├── .env.example            # шаблон настроек (секреты — в .env, не в git)
 ├── scripts/
@@ -69,7 +69,8 @@ sudo ./scripts/install.sh
 3. ufw — разрешает `OpenSSH`, `80/tcp`, `443/tcp`; включает, только если ещё не активен.
 4. Создаёт docker-сеть `proxy`.
 5. Поднимает traefik (`docker compose up -d`), ждёт healthy-статуса и выпуска
-   wildcard-сертификата `*.<ваш-домен>`.
+   wildcard-сертификата `*.<ваш-домен>` (запрос сертификата запускает
+   bootstrap-роутер в `traefik/dynamic/bootstrap.yml`, сайты для этого не нужны).
 
 ### Разовая DNS-запись
 
@@ -438,6 +439,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 |---|---|
 | `install.sh` падает: «port 80/443 is already in use» | Порт занят другим процессом (имя показано). Освободите порт и запустите снова |
 | В логах traefik: `unable to solve challenge` / сертификат не выпускается | Неверный `CF_DNS_API_TOKEN` или у токена нет прав `Zone — DNS — Edit` на вашу зону. Исправьте `.env`, затем `docker compose up -d` и повторите `install.sh` |
+| `check.sh`: FAIL «acme.json is missing or empty» | Сертификат запрашивается при старте (bootstrap-роутер); проверьте `docker logs traefik` — типовая причина: неверный `CF_DNS_API_TOKEN` |
 | Ошибка rate-limit от Let's Encrypt | Упрётесь в лимиты при экспериментах. Поставьте `LE_CA_SERVER` в staging-значение (см. комментарий в `.env.example`), `docker compose up -d`, устраните причину, верните production-значение |
 | `check.sh`: WARN «wildcard DNS does not resolve» | Нет записи `A: * → IP` в Cloudflare, либо она ещё не распропагировалась, либо включён оранжевый proxy-режим (нужен DNS only) |
 | Сайт отдаёт 404 | Неизвестный Host: проверьте метку `Host(...)` и что контейнер подключён к сети `proxy` (`docker inspect <контейнер>`) |

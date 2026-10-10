@@ -16,13 +16,18 @@ services:
     volumes:
       # Read-only Docker socket for container auto-discovery.
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Static configuration.
-      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # Static configuration template and its renderer: Traefik does not
+      # expand ${...} in its config file, so the template is rendered into
+      # /etc/traefik/traefik.yml at container start (see entrypoint below).
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml.tmpl:ro
+      - ./traefik/render-config.sh:/render-config.sh:ro
       # Dynamic routes for VPN sites (file provider); hot-reloaded.
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
       # ACME storage (wildcard certificate + account key); survives
       # container re-creation.
       - letsencrypt:/letsencrypt
+    # Render the configuration template, then exec Traefik.
+    entrypoint: ["/bin/sh", "/render-config.sh"]
     environment:
       DOMAIN: ${DOMAIN}
       LE_EMAIL: ${LE_EMAIL}
