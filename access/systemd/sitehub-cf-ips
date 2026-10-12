@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Cloudflare IP guard for the SiteHub entry container.
 #
-# Allows traffic to ports 80/443 on the external interface only from
-# Cloudflare ranges, so the origin cannot be reached directly (with a
-# forged Host header), bypassing Cloudflare Access. ufw does not filter
-# ports published by Docker containers, so the rule lives in the
-# DOCKER-USER chain.
+# Allows traffic to the host ports 80/443 published by the entry container
+# only from Cloudflare ranges, so the origin cannot be reached directly
+# (with a forged Host header), bypassing Cloudflare Access. ufw does not
+# filter ports published by Docker containers, so the rule lives in the
+# DOCKER-USER chain. Other services are not affected, even when their
+# container port is 80 or 443 (see ensure_rule).
 #
 # The ranges live in the ipset sets cloudflare4/cloudflare6 and are
 # re-downloaded weekly by sitehub-cf-ips-refresh.timer. Replacement is
@@ -26,7 +27,10 @@
 set -euo pipefail
 
 CHAIN="DOCKER-USER"
-PORTS="80,443"
+# Host ports published by the entry container. The guard matches the
+# ORIGINAL destination port (before Docker's DNAT, see ensure_rule):
+# these are exactly the ports of the SiteHub entry point.
+PORTS=(80 443)
 SET4="cloudflare4"
 SET6="cloudflare6"
 IPS_V4_URL="https://www.cloudflare.com/ips-v4"
@@ -115,33 +119,51 @@ have_ipv6() {
 # The same helper serves iptables and ip6tables. The negation belongs to
 # the match option (-m set ! --match-set ...), otherwise iptables-nft
 # rejects the rule.
+#
+# The port is matched as the ORIGINAL destination port (--ctorigdstport),
+# not as the current one: Docker's DNAT happens before this chain, so a
+# plain --dport 443 would also match unrelated services whose container
+# port is 443 but that are published on another host port (a VPN on
+# 8433 mapped to 443, for example), and the guard would cut them off.
 ensure_rule() {
-  local bin="$1" set="$2" iface="$3"
-  if ! "$bin" -w 5 -C "$CHAIN" -i "$iface" -p tcp -m multiport --dports "$PORTS" \
+  local bin="$1" set="$2" iface="$3" port="$4"
+  if ! "$bin" -w 5 -C "$CHAIN" -i "$iface" -p tcp -m conntrack --ctorigdstport "$port" \
       -m set ! --match-set "$set" src -j DROP 2>/dev/null; then
-    "$bin" -w 5 -I "$CHAIN" 1 -i "$iface" -p tcp -m multiport --dports "$PORTS" \
+    "$bin" -w 5 -I "$CHAIN" 1 -i "$iface" -p tcp -m conntrack --ctorigdstport "$port" \
       -m set ! --match-set "$set" src -j DROP
   fi
+}
+
+# List the rules of the chain that reference the set (optionally only
+# those containing $filter), stripped of the "-A DOCKER-USER" prefix.
+list_rules_for_set() {
+  local bin="$1" set="$2" filter="${3:-}"
+  if ! "$bin" -n -L "$CHAIN" >/dev/null 2>&1; then
+    return 0
+  fi
+  local rules
+  rules="$("$bin" -S "$CHAIN" | grep -F -- "--match-set ${set} src" | grep -F -- "-j DROP" || true)"
+  if [ -n "$filter" ]; then
+    rules="$(printf '%s\n' "$rules" | grep -F -- "$filter" || true)"
+  fi
+  printf '%s\n' "$rules" | sed 's/^-A DOCKER-USER //'
 }
 
 # Delete every rule that references the set: the external interface may
 # have changed since the rule was added, so the rules are found via
 # iptables -S instead of being reconstructed.
 delete_rules_for_set() {
-  local bin="$1" set="$2" rule
-  if ! "$bin" -n -L "$CHAIN" >/dev/null 2>&1; then
-    return 0
-  fi
+  local bin="$1" set="$2" filter="${3:-}" rule
   while IFS= read -r rule; do
     if [ -n "$rule" ]; then
       # shellcheck disable=SC2086
       "$bin" -w 5 -D "$CHAIN" $rule
     fi
-  done < <("$bin" -S "$CHAIN" | grep -F -- "--match-set ${set} src" | grep -F -- "-j DROP" | sed 's/^-A DOCKER-USER //')
+  done < <(list_rules_for_set "$bin" "$set" "$filter")
 }
 
 cmd_apply() {
-  local iface
+  local iface port
   iface="$(external_iface)"
   if [ -z "$iface" ]; then
     fail "cannot detect the external interface (no default IPv4 route)"
@@ -152,16 +174,25 @@ cmd_apply() {
 
   refresh_sets
 
-  ensure_rule iptables "$SET4" "$iface"
-  log OK "iptables: 80/443 on ${iface} are allowed from ${SET4} only"
+  for port in "${PORTS[@]}"; do
+    ensure_rule iptables "$SET4" "$iface" "$port"
+  done
+  # Rules left by older versions of the guard matched the post-DNAT port
+  # (-m multiport --dports) and could cut off unrelated services; the new
+  # rules are already in place, so removing them is safe.
+  delete_rules_for_set iptables "$SET4" "--dports"
+  log OK "iptables: host ports 80/443 on ${iface} are allowed from ${SET4} only"
 
   if ! have_ipv6; then
     log SKIP "no IPv6 default route; the ${SET6} rule is not needed"
   elif ! ip6tables -n -L "$CHAIN" >/dev/null 2>&1; then
     log WARN "Docker does not manage IPv6 (no ${CHAIN} chain in ip6tables); IPv6 traffic is not filtered - see the README"
   else
-    ensure_rule ip6tables "$SET6" "$iface"
-    log OK "ip6tables: 80/443 on ${iface} are allowed from ${SET6} only"
+    for port in "${PORTS[@]}"; do
+      ensure_rule ip6tables "$SET6" "$iface" "$port"
+    done
+    delete_rules_for_set ip6tables "$SET6" "--dports"
+    log OK "ip6tables: host ports 80/443 on ${iface} are allowed from ${SET6} only"
   fi
 }
 

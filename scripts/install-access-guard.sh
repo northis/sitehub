@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# SiteHub Access guard installer: allows traffic to ports 80/443 on the
-# external interface only from Cloudflare ranges, so Cloudflare Access
-# cannot be bypassed by connecting to the server IP directly with a
-# forged Host header. ufw does not filter ports published by Docker
-# containers, so the rule lives in the DOCKER-USER chain.
+# SiteHub Access guard installer: allows traffic to the host ports 80/443
+# published by the entry container only from Cloudflare ranges, so
+# Cloudflare Access cannot be bypassed by connecting to the server IP
+# directly with a forged Host header. ufw does not filter ports published
+# by Docker containers, so the rule lives in the DOCKER-USER chain.
 #
 # The ranges are refreshed weekly by sitehub-cf-ips-refresh.timer:
 # ips-v4/ips-v6 are downloaded and the ipset sets are swapped
@@ -140,14 +140,15 @@ enable_units() {
 
 verify() {
   printf '\n== Verification ==\n'
-  local iface ranges
+  local iface ranges port
   iface="$(ip -o -4 route show to default | awk '{print $5; exit}')"
-  if iptables -w 5 -C "$CHAIN" -i "$iface" -p tcp -m multiport --dports 80,443 \
-      -m set ! --match-set "$SET4" src -j DROP 2>/dev/null; then
-    log OK "${CHAIN} rule is active (external interface: ${iface})"
-  else
-    fail "${CHAIN} rule is missing after install; see 'journalctl -u sitehub-cf-ips.service'"
-  fi
+  for port in 80 443; do
+    if ! iptables -w 5 -C "$CHAIN" -i "$iface" -p tcp -m conntrack --ctorigdstport "$port" \
+        -m set ! --match-set "$SET4" src -j DROP 2>/dev/null; then
+      fail "${CHAIN} rule for port ${port} is missing after install; see 'journalctl -u sitehub-cf-ips.service'"
+    fi
+  done
+  log OK "${CHAIN} rules are active (host ports 80/443, external interface: ${iface})"
 
   ranges="$(ipset save "$SET4" 2>/dev/null | grep -c '^add ' || true)"
   if [ "${ranges:-0}" -gt 0 ]; then
@@ -165,7 +166,7 @@ verify() {
 
 print_summary() {
   printf '\n== Summary ==\n'
-  echo "Access guard installed: ports 80/443 on the external interface are reachable only from Cloudflare ranges."
+  echo "Access guard installed: the entry container's host ports 80/443 are reachable only from Cloudflare ranges."
   echo "- Weekly range refresh: systemctl list-timers sitehub-cf-ips-refresh.timer"
   echo "- Refresh log: journalctl -u sitehub-cf-ips-refresh.service"
   echo "- Rules are re-applied after 'systemctl restart docker'."
@@ -209,7 +210,8 @@ usage() {
   cat <<'EOF'
 Usage:
   sudo ./scripts/install-access-guard.sh [--force]
-      Allow 80/443 on the external interface only from Cloudflare ranges
+      Allow the entry container's host ports 80/443 on the external
+      interface only from Cloudflare ranges
       and refresh the ranges weekly (systemd timer).
       --force skips the check that the wildcard record is proxied.
   sudo ./scripts/install-access-guard.sh remove

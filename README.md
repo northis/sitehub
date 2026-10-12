@@ -256,7 +256,8 @@ curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}\n' https://site1.ва�
 Access защищает только трафик через Cloudflare. Сервер по-прежнему слушает
 443 на публичном IP: зная IP, можно обратиться к Traefik напрямую с нужным
 заголовком `Host` и попасть на сайт мимо Access. Закройте это, разрешив
-80/443 только с диапазонов Cloudflare. Важно: **ufw порты Docker-контейнеров
+80/443 (опубликованные порты входного контейнера) только с диапазонов
+Cloudflare. Важно: **ufw порты Docker-контейнеров
 не фильтрует** — правило нужно в цепочке `DOCKER-USER`. Включайте после того,
 как Access настроен, а запись `*` проксируется:
 
@@ -269,7 +270,10 @@ sudo ./scripts/install-access-guard.sh
 
 - создаёт наборы `cloudflare4`/`cloudflare6` (ipset) и правило `DOCKER-USER`:
   80/443 на внешнем интерфейсе доступны только с диапазонов Cloudflare (если
-  у сервера есть IPv6 и Docker управляет им — то и в `ip6tables`);
+  у сервера есть IPv6 и Docker управляет им — то и в `ip6tables`). Правило
+  матчит **исходный** порт назначения (до DNAT), поэтому другие сервисы на
+  сервере не затрагиваются, даже если их внутренний порт — 80 или 443
+  (например, VPN, опубликованный как `8433:443`);
 - ставит systemd-юниты: `sitehub-cf-ips.service` применяет правило при
   загрузке и после `systemctl restart docker` (перезапуск Docker очищает
   цепочку), а `sitehub-cf-ips-refresh.timer` **раз в неделю** (по
@@ -291,6 +295,7 @@ systemctl list-timers sitehub-cf-ips-refresh.timer   # следующий зап
 sudo systemctl start sitehub-cf-ips-refresh.service  # обновить сейчас
 journalctl -u sitehub-cf-ips-refresh.service         # логи обновления
 sudo ipset save cloudflare4 | head                   # текущие диапазоны
+sudo iptables -L DOCKER-USER -v -n | grep DROP       # счётчики сработавших правил
 sudo ./scripts/install-access-guard.sh remove        # снять защиту
 ```
 
@@ -701,6 +706,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | После установки защиты сайты недоступны снаружи | Запись `*` не проксируется через Cloudflare — трафик идёт напрямую, и правило его не пропускает. Включите оранжевое облачко; временно снять защиту: `sudo ./scripts/install-access-guard.sh remove` |
 | Диапазоны Cloudflare не обновляются | `journalctl -u sitehub-cf-ips-refresh.service`: при ошибке загрузки наборы не меняются, старые диапазоны продолжают работать. Ручной запуск: `sudo systemctl start sitehub-cf-ips-refresh.service` |
 | Правило пропало после `systemctl restart docker` | Возвращается автоматически (юнит привязан к `docker.service`); если нет — `sudo systemctl restart sitehub-cf-ips.service` |
+| После включения защиты отвалился другой сервис (VPN и т.п.) | Правило ограничивает только опубликованные 80/443 входного контейнера. Проверьте счётчики сработавших правил: `sudo iptables -L DOCKER-USER -v -n`, и что публикует спорный порт: `sudo iptables -t nat -S DOCKER \| grep <порт>`. Если защита ставилась старой версией — просто повторите `sudo ./scripts/install-access-guard.sh`: устаревшее правило удаляется автоматически |
 | Сайт отдаёт 401 «missing Cf-Access-Jwt-Assertion» | Запрос дошёл без токена Access: проверьте, что запись `*` проксируется и запрос идёт через Cloudflare; для публичного сайта (Bypass) уберите метку `cf-access-verify@file` |
 | Сайт отдаёт 403 «invalid Access JWT: ...» | Причина в тексте ответа и в `docker logs cf-access-verify`: `unexpected audience` — в `access/verifier/.env` AUD другого приложения; `unknown signing key` — не тот team domain; `token expired` — сессия истекла, обновите страницу |
 | Все сайты отдают 500 после включения проверки Access-JWT | Контейнер `cf-access-verify` не запущен (проверка fail-closed): `docker ps -a`, `docker logs cf-access-verify`; перезапуск: `docker compose -f access/verifier/compose.yaml up -d` |
