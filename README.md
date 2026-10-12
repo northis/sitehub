@@ -302,6 +302,26 @@ sudo ./scripts/install-access-guard.sh remove        # снять защиту
 Отключать защиту только через `remove`: юниты сами возвращают правило
 (например, после перезапуска Docker), поэтому `systemctl stop` — не выключатель.
 
+Проверка, что прямой доступ по IP закрыт (запускать **не на сервере**, а с любой
+внешней машины: трафик с самого сервера правило не фильтрует — он не проходит
+цепочку `FORWARD`, и проверка будет ложно-успешной):
+
+```bash
+./access/check-direct-access.sh site.ваш-домен 203.0.113.10
+```
+
+Ожидание: шаг 1 — `OK` (правило `DROP` молча роняет пакеты, поэтому именно
+таймаут, а не «connection refused»); шаг 2 — `200` (сайт) или `302` на
+`https://<team>.cloudflareaccess.com/...` (страница входа Access). Если шаг 2
+тоже не отвечает — запись не проксируется либо скрипт запущен на сервере.
+
+На сервере в этот момент видно, что сработало именно правило защиты (счётчик
+пакетов растёт):
+
+```bash
+sudo iptables -L DOCKER-USER -v -n | grep ctorigdstport
+```
+
 **Важно:** фильтр проверяет только источник запроса — что он пришёл из сети
 Cloudflare, — но не то, что посетитель прошёл Access. Кто может отправить
 запрос с CF-адреса (например, Worker в вашей же зоне), обойдёт такую защиту;
@@ -435,17 +455,6 @@ Windows (за NAT)                      Ubuntu (публичный IP)
 ```bash
 sudo ./scripts/install-vpn.sh
 ```
-
-**Если SoftEther уже установлен своим проектом** (например, в `/opt/softether`):
-у чужой установки обычно **то же имя compose-проекта** (по имени каталога) и
-**то же имя контейнера** `softether`, а Docker Compose считает контейнеры по
-проекту и сервису — то есть запуск варианта репозитория **заменит** этот
-контейнер (данные чужого проекта останутся в его каталоге, но его
-конфигурация перестанет использоваться). Скрипт проверяет это в preflight и
-останавливается с ошибкой; чтобы перейти на вариант репозитория, сначала
-осознанно остановите и удалите чужой контейнер. И помните: 443 занят Traefik,
-поэтому чужой SoftEther при сосуществовании должен публиковаться на другом
-порту (например, `8443:443`).
 
 Скрипт **идемпотентен**: каждый шаг пропускается, если уже выполнен. Что он делает:
 
@@ -581,13 +590,23 @@ http:
 curl -sS http://10.77.77.21:8080/ -o /dev/null -w '%{http_code}\n'    # ожидание: 200
 ```
 
+Из контейнера Traefik — это тот же путь, что у реального трафика (ловит
+случай «с хоста видно, а Traefik — нет»: не поднят tap, нет правил или в
+контейнере закэширован ICMP «сеть недоступна»):
+
+```bash
+docker compose exec -T traefik wget -qO- --timeout=5 http://10.77.77.21:8080/ >/dev/null \
+  && echo "traefik -> site OK" || echo "traefik -> site FAIL"
+```
+
 Снаружи — через Traefik:
 
 ```bash
 curl -sS https://site1.ваш-домен/ -o /dev/null -w '%{http_code} %{ssl_verify_result}\n'    # ожидание: 200 0
 ```
 
-Общая диагностика VPN-варианта (read-only, код 1 при FAIL):
+Общая диагностика VPN-варианта (read-only, код 1 при FAIL; проверяет и
+доступность сайтов с хоста, и из контейнера Traefik):
 
 ```bash
 sudo ./scripts/check-vpn.sh
@@ -597,7 +616,9 @@ sudo ./scripts/check-vpn.sh
 
 `check-vpn.sh` проверяет контейнер `softether`, `tap_vpn` и адрес, local bridge,
 слушатель `8443`, правила iptables, ufw, сессии/DHCP и доступность сайтов из
-`traefik/dynamic/vpn-sites.yml`; каждая строка — `OK`/`WARN`/`FAIL` с подсказкой.
+`traefik/dynamic/vpn-sites.yml` — как с хоста, так и из контейнера `traefik`
+(второй путь и есть путь реального трафика); каждая строка — `OK`/`WARN`/`FAIL`
+с подсказкой.
 
 Логи:
 
@@ -724,6 +745,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | Сайт отдаёт 403 «invalid Access JWT: ...» | Причина в тексте ответа и в `docker logs cf-access-verify`: `unexpected audience` — в `access/verifier/.env` AUD другого приложения; `unknown signing key` — не тот team domain; `token expired` — сессия истекла, обновите страницу |
 | Все сайты отдают 500 после включения проверки Access-JWT | Контейнер `cf-access-verify` не запущен (проверка fail-closed): `docker ps -a`, `docker logs cf-access-verify`; перезапуск: `docker compose -f access/verifier/compose.yaml up -d` |
 | `install-access-verify.sh` падает: «could not load the signing keys» | Неверный `TEAM_DOMAIN` в `access/verifier/.env` или сервер не может достучаться до `*.cloudflareaccess.com`; исправьте и повторите |
+| Cloudflare отдаёт 522 (origin недоступен) | CF не может подключиться к 443 на сервере: проверьте `docker ps` (traefik healthy), что фильтр Cloudflare не пуст (`sudo ipset list cloudflare4`, счётчики `sudo iptables -L DOCKER-USER -v -n`), `sudo ufw status` и что запись поддомена проксируется и указывает на IP сервера |
 | Сайт отдаёт 404 | Неизвестный Host: проверьте метку `Host(...)` и что контейнер подключён к сети `proxy` (`docker inspect <контейнер>`) |
 | Сайт отдаёт 503 | Контейнер сайта не запущен или не отвечает на указанном в метке порту: `docker ps`, `docker logs <сайт>` |
 | Два сайта конфликтуют | Дубль значения `Host(...)` в метках: найдите `docker inspect` обоих и исправьте; конфликт виден в `docker logs traefik` |
@@ -734,7 +756,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | DHCP не выдал адрес VPN-адаптеру | Задайте статический адрес на SoftEther-адаптере: `10.77.77.21`, маска `255.255.255.0`, шлюз и DNS не указывать |
 | Крупные файлы через VPN-сайт загружаются медленно или обрываются | MTU/фрагментация в туннеле: `tap_vpn` — 1400, MSS clamp включён; при проблемах уменьшите MTU адаптера на Windows |
 | После `systemctl restart docker` VPN-сайты отдают 503 | Правила iptables потеряны: `sudo systemctl restart sitehub-vpn-net.service`; проверка — `sudo ./scripts/check-vpn.sh` |
-| `install-vpn.sh` заменил уже работавший SoftEther (свой проект) | Вариант репозитория не совместим с чужой установкой: у неё то же имя compose-проекта и контейнера, поэтому `docker compose up` заменяет контейнер (данные чужого проекта остаются в его каталоге). Уберите вариант репозитория (см. «Откат») и поднимите свой проект: `docker compose up -d` в его каталоге, публикуя SoftEther на свободном порту (`8443:443`, 443 занят Traefik), затем обновите порт в клиентах. Скрипт проверяет пересечение в preflight и останавливается |
+| С сервера сайт на Windows открывается, а через поддомен — 502/504 | Traefik (контейнер) не может дойти до VPN-адреса, хотя хост может: у трафика из docker-сети другой путь. Проверьте правила для tap: `sudo iptables -S DOCKER-USER \| grep tap_vpn` (должны быть ACCEPT в обе стороны) и `sudo iptables -t nat -S POSTROUTING \| grep 10.77.77.0`; восстановить: `sudo systemctl restart sitehub-vpn-net.service`. Если из контейнера видно `Network unreachable`, хотя маршрут в контейнере есть — сбросьте кэш негативных маршрутов: `docker compose exec -T traefik ip route flush cache` (или пересоздайте traefik) |
 
 ## Приёмочный чек-лист
 

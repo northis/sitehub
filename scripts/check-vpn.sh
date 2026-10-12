@@ -17,6 +17,7 @@ cd "$REPO_DIR"
 ENV_FILE="softether/.env"
 SITES_FILE="traefik/dynamic/vpn-sites.yml"
 CONTAINER_NAME="softether"
+TRAEFIK_CONTAINER="traefik"
 TAP_NAME="tap_vpn"
 PROXY_NETWORK="proxy"
 
@@ -259,7 +260,25 @@ check_sites() {
     else
       report FAIL "site" "${url} is unreachable; check the VPN connection, the Windows Firewall rule and the site container"
     fi
+    check_site_from_traefik "$url"
   done <<< "$urls"
+}
+
+# Real traffic reaches a VPN site through the Traefik container, and that
+# path differs from the host one: a host-side check can pass while the
+# container cannot reach the site (missing tap rules, disabled forwarding
+# or a cached negative route inside the container). Both are checked.
+check_site_from_traefik() {
+  local url="$1"
+  if ! docker inspect "$TRAEFIK_CONTAINER" >/dev/null 2>&1; then
+    report WARN "traefik-vpn" "container '${TRAEFIK_CONTAINER}' not found; cannot check ${url} from Traefik"
+    return
+  fi
+  if docker exec "$TRAEFIK_CONTAINER" wget -qO- --timeout=5 "$url" >/dev/null 2>&1; then
+    report OK "traefik-vpn" "${url} is reachable from the '${TRAEFIK_CONTAINER}' container"
+  else
+    report FAIL "traefik-vpn" "${url} is not reachable from '${TRAEFIK_CONTAINER}' (the host-side check can still pass); see README, 'Сайты за VPN' and Troubleshooting"
+  fi
 }
 
 main() {

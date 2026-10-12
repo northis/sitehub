@@ -21,6 +21,8 @@ services:
       # Server logs.
       - ./logs:/var/log/softether
     restart: unless-stopped
+    # Give SoftEther time to save its configuration on stop.
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
