@@ -143,7 +143,7 @@ verify() {
   local iface ranges
   iface="$(ip -o -4 route show to default | awk '{print $5; exit}')"
   if iptables -w 5 -C "$CHAIN" -i "$iface" -p tcp -m multiport --dports 80,443 \
-      ! -m set --match-set "$SET4" src -j DROP 2>/dev/null; then
+      -m set ! --match-set "$SET4" src -j DROP 2>/dev/null; then
     log OK "${CHAIN} rule is active (external interface: ${iface})"
   else
     fail "${CHAIN} rule is missing after install; see 'journalctl -u sitehub-cf-ips.service'"

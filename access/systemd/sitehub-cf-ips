@@ -112,13 +112,15 @@ have_ipv6() {
 }
 
 # Add the DROP rule unless its exact specification is already present.
-# The same helper serves iptables and ip6tables.
+# The same helper serves iptables and ip6tables. The negation belongs to
+# the match option (-m set ! --match-set ...), otherwise iptables-nft
+# rejects the rule.
 ensure_rule() {
   local bin="$1" set="$2" iface="$3"
   if ! "$bin" -w 5 -C "$CHAIN" -i "$iface" -p tcp -m multiport --dports "$PORTS" \
-      ! -m set --match-set "$set" src -j DROP 2>/dev/null; then
+      -m set ! --match-set "$set" src -j DROP 2>/dev/null; then
     "$bin" -w 5 -I "$CHAIN" 1 -i "$iface" -p tcp -m multiport --dports "$PORTS" \
-      ! -m set --match-set "$set" src -j DROP
+      -m set ! --match-set "$set" src -j DROP
   fi
 }
 
