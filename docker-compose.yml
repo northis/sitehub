@@ -33,6 +33,7 @@ services:
       LE_EMAIL: ${LE_EMAIL}
       CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
       LE_CA_SERVER: ${LE_CA_SERVER}
+      CF_ACCESS_VERIFY_GLOBAL: ${CF_ACCESS_VERIFY_GLOBAL:-false}
       TZ: ${TZ}
     networks:
       - proxy

@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Cloudflare IP guard for the SiteHub entry container.
+#
+# Allows traffic to ports 80/443 on the external interface only from
+# Cloudflare ranges, so the origin cannot be reached directly (with a
+# forged Host header), bypassing Cloudflare Access. ufw does not filter
+# ports published by Docker containers, so the rule lives in the
+# DOCKER-USER chain.
+#
+# The ranges live in the ipset sets cloudflare4/cloudflare6 and are
+# re-downloaded weekly by sitehub-cf-ips-refresh.timer. Replacement is
+# atomic: a temporary set is filled first and swapped in, so traffic
+# always sees a populated set. When the download fails or returns
+# implausible data, the current sets are kept and the script exits
+# non-zero.
+#
+# Idempotent: sets are created with -exist, every rule is added only
+# when its exact specification is absent. Runs are serialized with a
+# lock, so the weekly refresh cannot race with a Docker-triggered
+# re-apply.
+#
+# Usage: sitehub-cf-ips apply|remove
+#   apply  - refresh the sets and ensure the DOCKER-USER rules
+#   remove - remove the rules and destroy the sets
+
+set -euo pipefail
+
+CHAIN="DOCKER-USER"
+PORTS="80,443"
+SET4="cloudflare4"
+SET6="cloudflare6"
+IPS_V4_URL="https://www.cloudflare.com/ips-v4"
+IPS_V6_URL="https://www.cloudflare.com/ips-v6"
+LOCK_FILE="/run/sitehub-cf-ips.lock"
+# Sanity floors: a truncated or error response must not empty a set.
+MIN_V4_RANGES=5
+MIN_V6_RANGES=3
+
+log() { printf '[%s] %s\n' "$1" "$2"; }
+fail() { log FAIL "$1"; exit 1; }
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    fail "run as root (systemd runs this script as root)"
+  fi
+}
+
+# Serialize concurrent runs (the weekly timer, a Docker-triggered
+# re-apply and manual calls): a partially filled temporary set must
+# never be swapped in.
+acquire_lock() {
+  exec 9>"$LOCK_FILE"
+  flock 9
+}
+
+# Download a range list and verify it: the download succeeded, it has at
+# least MIN lines and every line matches the family's CIDR syntax.
+fetch_ranges() {
+  local url="$1" regex="$2" min="$3" file="$4"
+  if ! curl -fsS --max-time 30 --retry 3 --retry-delay 5 -o "$file" "$url"; then
+    return 1
+  fi
+  sed -i 's/\r$//; s/[[:space:]]//g; /^$/d' "$file"
+  if [ "$(wc -l < "$file")" -lt "$min" ]; then
+    return 1
+  fi
+  if grep -qvE "$regex" "$file"; then
+    return 1
+  fi
+}
+
+# Build a temporary set from the file, then swap it with the live set:
+# there is no window where the live set is empty.
+rebuild_set() {
+  local set="$1" family="$2" file="$3"
+  local tmp="${set}_new"
+  ipset create "$tmp" hash:net family "$family" -exist
+  ipset flush "$tmp"
+  local range
+  while IFS= read -r range; do
+    ipset add "$tmp" "$range" -exist
+  done < "$file"
+  ipset create "$set" hash:net family "$family" -exist
+  ipset swap "$tmp" "$set"
+  ipset destroy "$tmp"
+}
+
+refresh_sets() {
+  local work
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${work}'" EXIT
+
+  if ! fetch_ranges "$IPS_V4_URL" '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$MIN_V4_RANGES" "${work}/v4"; then
+    fail "invalid or incomplete response from ${IPS_V4_URL}; keeping the current ${SET4} set"
+  fi
+  if ! fetch_ranges "$IPS_V6_URL" '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$MIN_V6_RANGES" "${work}/v6"; then
+    fail "invalid or incomplete response from ${IPS_V6_URL}; keeping the current ${SET6} set"
+  fi
+
+  rebuild_set "$SET4" inet "${work}/v4"
+  rebuild_set "$SET6" inet6 "${work}/v6"
+  log OK "${SET4}: $(wc -l < "${work}/v4") range(s), ${SET6}: $(wc -l < "${work}/v6") range(s)"
+}
+
+external_iface() {
+  ip -o -4 route show to default | awk '{print $5; exit}'
+}
+
+have_ipv6() {
+  ip -6 route show default 2>/dev/null | grep -q .
+}
+
+# Add the DROP rule unless its exact specification is already present.
+# The same helper serves iptables and ip6tables.
+ensure_rule() {
+  local bin="$1" set="$2" iface="$3"
+  if ! "$bin" -w 5 -C "$CHAIN" -i "$iface" -p tcp -m multiport --dports "$PORTS" \
+      ! -m set --match-set "$set" src -j DROP 2>/dev/null; then
+    "$bin" -w 5 -I "$CHAIN" 1 -i "$iface" -p tcp -m multiport --dports "$PORTS" \
+      ! -m set --match-set "$set" src -j DROP
+  fi
+}
+
+# Delete every rule that references the set: the external interface may
+# have changed since the rule was added, so the rules are found via
+# iptables -S instead of being reconstructed.
+delete_rules_for_set() {
+  local bin="$1" set="$2" rule
+  if ! "$bin" -n -L "$CHAIN" >/dev/null 2>&1; then
+    return 0
+  fi
+  while IFS= read -r rule; do
+    if [ -n "$rule" ]; then
+      # shellcheck disable=SC2086
+      "$bin" -w 5 -D "$CHAIN" $rule
+    fi
+  done < <("$bin" -S "$CHAIN" | grep -F -- "--match-set ${set} src" | grep -F -- "-j DROP" | sed 's/^-A DOCKER-USER //')
+}
+
+cmd_apply() {
+  local iface
+  iface="$(external_iface)"
+  if [ -z "$iface" ]; then
+    fail "cannot detect the external interface (no default IPv4 route)"
+  fi
+  if ! iptables -n -L "$CHAIN" >/dev/null 2>&1; then
+    fail "iptables chain ${CHAIN} not found; is Docker running?"
+  fi
+
+  refresh_sets
+
+  ensure_rule iptables "$SET4" "$iface"
+  log OK "iptables: 80/443 on ${iface} are allowed from ${SET4} only"
+
+  if ! have_ipv6; then
+    log SKIP "no IPv6 default route; the ${SET6} rule is not needed"
+  elif ! ip6tables -n -L "$CHAIN" >/dev/null 2>&1; then
+    log WARN "Docker does not manage IPv6 (no ${CHAIN} chain in ip6tables); IPv6 traffic is not filtered - see the README"
+  else
+    ensure_rule ip6tables "$SET6" "$iface"
+    log OK "ip6tables: 80/443 on ${iface} are allowed from ${SET6} only"
+  fi
+}
+
+cmd_remove() {
+  delete_rules_for_set iptables "$SET4"
+  delete_rules_for_set ip6tables "$SET6"
+  ipset destroy "$SET4" 2>/dev/null || true
+  ipset destroy "$SET6" 2>/dev/null || true
+  ipset destroy "${SET4}_new" 2>/dev/null || true
+  ipset destroy "${SET6}_new" 2>/dev/null || true
+  log OK "${CHAIN} rules and ipset sets removed"
+}
+
+usage() {
+  printf 'Usage: %s apply|remove\n' "$(basename "$0")" >&2
+}
+
+case "${1:-}" in
+  apply)
+    require_root
+    acquire_lock
+    cmd_apply
+    ;;
+  remove)
+    require_root
+    acquire_lock
+    cmd_remove
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -1,0 +1,39 @@
+# Cloudflare Access JWT verifier: the Traefik forwardAuth target that
+# validates Cf-Access-Jwt-Assertion before a request reaches a site.
+#
+# Started by scripts/install-access-verify.sh, not by the main compose
+# file: it is an optional add-on. The service listens only inside the
+# Docker "proxy" network (no published ports) and reads its settings
+# from .env next to this file.
+#
+# Rebuild after changing server.js:
+#   docker compose -f access/verifier/compose.yaml up -d --build
+
+name: sitehub-access-verify
+
+services:
+  cf-access-verify:
+    image: sitehub-cf-access-verify:latest
+    build: .
+    container_name: cf-access-verify
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - proxy
+    healthcheck:
+      # TCP-level check: no HTTP endpoint exists that a client could
+      # reach through Traefik to skip the verification.
+      test: ["CMD", "node", "-e", "const s=require('net').connect(4180,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  proxy:
+    external: true

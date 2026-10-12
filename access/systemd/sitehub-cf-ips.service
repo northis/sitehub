@@ -1,0 +1,17 @@
+[Unit]
+Description=SiteHub Cloudflare IP guard (80/443 only from Cloudflare ranges)
+# The DOCKER-USER chain exists only while Docker is running, and a Docker
+# (re)start flushes it, so the rules are (re)applied on every Docker
+# start: PartOf propagates 'systemctl restart docker' (and stop) here,
+# while WantedBy=docker.service re-runs the unit after a plain stop/start.
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sitehub-cf-ips apply
+ExecStop=/usr/local/sbin/sitehub-cf-ips remove
+
+[Install]
+WantedBy=docker.service

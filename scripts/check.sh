@@ -15,6 +15,8 @@ cd "$REPO_DIR"
 ENV_FILE=".env"
 NETWORK_NAME="proxy"
 CONTAINER_NAME="traefik"
+VERIFY_CONTAINER="cf-access-verify"
+VERIFY_IMAGE="sitehub-cf-access-verify:latest"
 ACME_MOUNTPOINT="/letsencrypt"
 ACME_FILE="${ACME_MOUNTPOINT}/acme.json"
 CERT_WARN_DAYS=21
@@ -97,6 +99,29 @@ check_network() {
   report OK "network" "'${NETWORK_NAME}' exists; attached: ${members:-none}"
 }
 
+# Optional Cloudflare Access JWT verification (access/verifier): skipped
+# when the verifier container is not installed.
+check_access_verify() {
+  if ! docker inspect "$VERIFY_CONTAINER" >/dev/null 2>&1; then
+    return
+  fi
+  local running
+  running="$(docker inspect -f '{{.State.Running}}' "$VERIFY_CONTAINER" 2>/dev/null || true)"
+  if [ "$running" != "true" ]; then
+    report FAIL "access-jwt" "container '${VERIFY_CONTAINER}' is not running; start it: docker compose -f access/verifier/compose.yaml up -d"
+    return
+  fi
+  # A request without a token must be rejected with 401.
+  local code
+  code="$(docker run --rm --network "$NETWORK_NAME" "$VERIFY_IMAGE" \
+    node -e "fetch('http://${VERIFY_CONTAINER}:4180/').then((r)=>{console.log(r.status);process.exit(0);}).catch(()=>{console.log('000');process.exit(0);});" 2>/dev/null | tail -n1 || true)"
+  if [ "$code" = "401" ]; then
+    report OK "access-jwt" "verifier rejects requests without an Access JWT"
+  else
+    report FAIL "access-jwt" "verifier answered '${code:-no response}' instead of 401; check 'docker logs ${VERIFY_CONTAINER}' and rebuild: docker compose -f access/verifier/compose.yaml up -d --build"
+  fi
+}
+
 check_certificate() {
   local volume
   volume="$(docker inspect "$CONTAINER_NAME" --format "{{range .Mounts}}{{if eq .Destination \"${ACME_MOUNTPOINT}\"}}{{.Name}}{{end}}{{end}}" 2>/dev/null || true)"
@@ -164,6 +189,7 @@ main() {
   check_traefik
   check_ports
   check_network
+  check_access_verify
   check_certificate
   check_dns
   check_redirect

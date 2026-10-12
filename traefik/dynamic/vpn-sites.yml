@@ -14,6 +14,9 @@
 #     site1-vpn:
 #       rule: "Host(`site1.foodomain.com`)"
 #       service: site1-vpn
+#       # Optional Access JWT verification (the verifier container must
+#       # be installed, see the README):
+#       # middlewares: [cf-access-verify@file]
 #   services:
 #     site1-vpn:
 #       loadBalancer:

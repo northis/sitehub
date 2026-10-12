@@ -1,0 +1,12 @@
+[Unit]
+Description=SiteHub: weekly refresh of the Cloudflare IP ranges and re-apply of the guard
+# Runs the same idempotent 'apply' as sitehub-cf-ips.service: it
+# re-downloads ips-v4/ips-v6, swaps the ipset sets atomically and
+# restores the DOCKER-USER rule if it was lost. Runs are serialized by
+# a lock in the script, so this cannot race with a Docker-triggered
+# re-apply.
+After=sitehub-cf-ips.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sitehub-cf-ips apply

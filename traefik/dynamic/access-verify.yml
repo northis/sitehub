@@ -1,0 +1,38 @@
+# Cloudflare Access JWT verification at the entry container.
+#
+# Attach this middleware to the routers of sites that must be reachable
+# only with a valid Access session: every request is passed to the
+# verifier container (access/verifier), and it reaches the site only when
+# the Cf-Access-Jwt-Assertion header carries a valid, unexpired token of
+# your Access application. This closes requests that arrive from
+# Cloudflare's network without passing Access (for example, sent by a
+# Worker), which the IP filter alone cannot do.
+#
+# Per site (a label on the site's router):
+#   traefik.http.routers.site1.middlewares: "cf-access-verify@file"
+#
+# For every site at once: set CF_ACCESS_VERIFY_GLOBAL=true in .env and
+# re-create traefik (docker compose up -d); public Bypass apps then get
+# 401, so with public sites use the per-site labels instead.
+#
+# The verifier itself is installed by scripts/install-access-verify.sh.
+
+http:
+  middlewares:
+    cf-access-verify:
+      forwardAuth:
+        address: "http://cf-access-verify:4180/"
+        # Do not trust client-supplied X-Forwarded-* headers (Traefik adds
+        # its own); also silences the startup warning.
+        trustForwardHeader: false
+        # Only the token is sent to the verifier, so client-supplied
+        # headers (including X-Forwarded-*) cannot influence the decision.
+        authRequestHeaders:
+          - "Cf-Access-Jwt-Assertion"
+        # The verifier returns the email from the validated token under
+        # the Access header name; Traefik replaces any client-supplied
+        # value with it, so sites can trust the header.
+        authResponseHeaders:
+          - "Cf-Access-Authenticated-User-Email"
+        # The verifier answers with a short text body.
+        maxResponseBodySize: 4096

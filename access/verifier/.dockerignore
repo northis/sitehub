@@ -1,0 +1,2 @@
+# Keep instance settings out of the image build context.
+.env

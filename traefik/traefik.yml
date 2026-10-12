@@ -30,6 +30,7 @@ entryPoints:
       # containers need no labels for them either.
       middlewares:
         - security-headers@file
+        ${CF_ACCESS_VERIFY_MIDDLEWARE}
 
 providers:
   docker:
