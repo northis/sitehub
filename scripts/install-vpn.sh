@@ -122,6 +122,25 @@ container_running() {
   [ "$running" = "true" ]
 }
 
+# A container named 'softether' may belong to another installation (a
+# standalone project in another directory usually has the same compose
+# project name - the directory name - and the same container name).
+# Docker Compose identifies containers by project and service, so starting
+# this variant would replace that container. Stop before changing anything
+# instead of silently taking over a working VPN.
+check_foreign_softether() {
+  if ! docker inspect "$SOFTETHER_CONTAINER" >/dev/null 2>&1; then
+    return 0
+  fi
+  local working_dir
+  working_dir="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$SOFTETHER_CONTAINER" 2>/dev/null || true)"
+  if [ "$working_dir" = "$REPO_DIR" ]; then
+    log SKIP "container '${SOFTETHER_CONTAINER}' belongs to this repository"
+    return 0
+  fi
+  fail "container '${SOFTETHER_CONTAINER}' already exists and belongs to another installation (compose working dir: '${working_dir:-none}', expected ${REPO_DIR}); starting this variant would replace it. Keep that installation (do not run this script) or stop and remove it deliberately, then re-run. Its data stays in its own directory"
+}
+
 preflight() {
   printf '\n== Preflight ==\n'
   require_root
@@ -131,6 +150,8 @@ preflight() {
     fail "docker network '${PROXY_NETWORK}' does not exist; run 'sudo ./scripts/install.sh' first"
   fi
   log OK "docker network '${PROXY_NETWORK}' exists"
+
+  check_foreign_softether
 
   # Port 8443 must be free unless the SoftEther container already owns
   # it (a re-run after a successful install).

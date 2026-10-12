@@ -203,8 +203,13 @@ const server = http.createServer((req, res) => {
   const rawToken = req.headers['cf-access-jwt-assertion'];
   const token = Array.isArray(rawToken) ? rawToken[0] : rawToken;
   if (!token) {
+    const host = safeHeaderValue(req.headers['x-forwarded-host'] || '');
     console.error(`deny 401 ${requestLabel(req)}: missing Cf-Access-Jwt-Assertion`);
-    deny(res, 401, 'missing Cf-Access-Jwt-Assertion header');
+    deny(
+      res,
+      401,
+      `missing Cf-Access-Jwt-Assertion header${host ? ` for ${host}` : ''}: the request did not go through Cloudflare Access (check the proxied DNS record and the Access application hostname)`,
+    );
     return;
   }
 

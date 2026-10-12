@@ -354,8 +354,9 @@ sudo ./scripts/install-access-verify.sh --global   # CF_ACCESS_VERIFY_GLOBAL=tru
 Проверка и откат:
 
 ```bash
-docker logs cf-access-verify    # отказы с причиной
-curl -ks -o /dev/null -w '%{http_code}\n' -H "Host: site1.ваш-домен" https://localhost/   # ожидание: 401 без токена
+docker logs cf-access-verify    # отказы с причиной (allow/deny + email)
+# локальный запрос идёт мимо Cloudflare, поэтому 401 — это ожидаемо:
+curl -ks -o /dev/null -w '%{http_code}\n' -H "Host: site1.ваш-домен" https://localhost/
 sudo ./scripts/install-access-verify.sh remove
 ```
 
@@ -434,6 +435,17 @@ Windows (за NAT)                      Ubuntu (публичный IP)
 ```bash
 sudo ./scripts/install-vpn.sh
 ```
+
+**Если SoftEther уже установлен своим проектом** (например, в `/opt/softether`):
+у чужой установки обычно **то же имя compose-проекта** (по имени каталога) и
+**то же имя контейнера** `softether`, а Docker Compose считает контейнеры по
+проекту и сервису — то есть запуск варианта репозитория **заменит** этот
+контейнер (данные чужого проекта останутся в его каталоге, но его
+конфигурация перестанет использоваться). Скрипт проверяет это в preflight и
+останавливается с ошибкой; чтобы перейти на вариант репозитория, сначала
+осознанно остановите и удалите чужой контейнер. И помните: 443 занят Traefik,
+поэтому чужой SoftEther при сосуществовании должен публиковаться на другом
+порту (например, `8443:443`).
 
 Скрипт **идемпотентен**: каждый шаг пропускается, если уже выполнен. Что он делает:
 
@@ -707,7 +719,8 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | Диапазоны Cloudflare не обновляются | `journalctl -u sitehub-cf-ips-refresh.service`: при ошибке загрузки наборы не меняются, старые диапазоны продолжают работать. Ручной запуск: `sudo systemctl start sitehub-cf-ips-refresh.service` |
 | Правило пропало после `systemctl restart docker` | Возвращается автоматически (юнит привязан к `docker.service`); если нет — `sudo systemctl restart sitehub-cf-ips.service` |
 | После включения защиты отвалился другой сервис (VPN и т.п.) | Правило ограничивает только опубликованные 80/443 входного контейнера. Проверьте счётчики сработавших правил: `sudo iptables -L DOCKER-USER -v -n`, и что публикует спорный порт: `sudo iptables -t nat -S DOCKER \| grep <порт>`. Если защита ставилась старой версией — просто повторите `sudo ./scripts/install-access-guard.sh`: устаревшее правило удаляется автоматически |
-| Сайт отдаёт 401 «missing Cf-Access-Jwt-Assertion» | Запрос дошёл без токена Access: проверьте, что запись `*` проксируется и запрос идёт через Cloudflare; для публичного сайта (Bypass) уберите метку `cf-access-verify@file` |
+| Сайт отдаёт 401 «missing Cf-Access-Jwt-Assertion header» | Запрос дошёл до Traefik минуя Cloudflare Access. Локальная проверка с `https://localhost/` так и должна отвечать — токена в этом пути нет, это ожидаемо. Если это в браузере через домен: проверьте, что запись проксируется (`dig +short stub.ваш-домен` возвращает адреса Cloudflare, а не IP сервера) и что приложение Access покрывает этот поддомен (Bypass-политика токена не добавляет); публичному сайту метка `cf-access-verify@file` не нужна |
+| Сайт открывается сразу, без страницы входа, хотя включена глобальная проверка | Скорее всего жива сессия Access (cookie `CF_Authorization`, срок — Session duration приложения). Откройте сайт в приватном окне — должна появиться страница входа; прервать сессии сразу: Zero Trust → **Team & Resources** → **Users** → **Revoke**. Признак, что защита работает: при заходе в `docker logs cf-access-verify` появляется `allow ... <email>` |
 | Сайт отдаёт 403 «invalid Access JWT: ...» | Причина в тексте ответа и в `docker logs cf-access-verify`: `unexpected audience` — в `access/verifier/.env` AUD другого приложения; `unknown signing key` — не тот team domain; `token expired` — сессия истекла, обновите страницу |
 | Все сайты отдают 500 после включения проверки Access-JWT | Контейнер `cf-access-verify` не запущен (проверка fail-closed): `docker ps -a`, `docker logs cf-access-verify`; перезапуск: `docker compose -f access/verifier/compose.yaml up -d` |
 | `install-access-verify.sh` падает: «could not load the signing keys» | Неверный `TEAM_DOMAIN` в `access/verifier/.env` или сервер не может достучаться до `*.cloudflareaccess.com`; исправьте и повторите |
@@ -721,6 +734,7 @@ sudo ufw delete allow 80/tcp && sudo ufw delete allow 443/tcp
 | DHCP не выдал адрес VPN-адаптеру | Задайте статический адрес на SoftEther-адаптере: `10.77.77.21`, маска `255.255.255.0`, шлюз и DNS не указывать |
 | Крупные файлы через VPN-сайт загружаются медленно или обрываются | MTU/фрагментация в туннеле: `tap_vpn` — 1400, MSS clamp включён; при проблемах уменьшите MTU адаптера на Windows |
 | После `systemctl restart docker` VPN-сайты отдают 503 | Правила iptables потеряны: `sudo systemctl restart sitehub-vpn-net.service`; проверка — `sudo ./scripts/check-vpn.sh` |
+| `install-vpn.sh` заменил уже работавший SoftEther (свой проект) | Вариант репозитория не совместим с чужой установкой: у неё то же имя compose-проекта и контейнера, поэтому `docker compose up` заменяет контейнер (данные чужого проекта остаются в его каталоге). Уберите вариант репозитория (см. «Откат») и поднимите свой проект: `docker compose up -d` в его каталоге, публикуя SoftEther на свободном порту (`8443:443`, 443 занят Traefik), затем обновите порт в клиентах. Скрипт проверяет пересечение в preflight и останавливается |
 
 ## Приёмочный чек-лист
 
