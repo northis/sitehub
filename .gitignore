@@ -9,3 +9,4 @@
 softether/.env
 softether/data/
 softether/logs/
+examples/test/*
