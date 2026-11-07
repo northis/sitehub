@@ -1,8 +1,12 @@
 # Enforce Unix line endings: these files are consumed on the Ubuntu server
 *.sh text eol=lf
+scripts/vpn-window text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 .env.example text eol=lf
 access/systemd/* text eol=lf
 access/verifier/* text eol=lf
 softether/systemd/* text eol=lf
+
+# Windows PowerShell files are edited and run on Windows
+*.ps1 text eol=crlf

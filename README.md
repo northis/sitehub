@@ -35,7 +35,10 @@
 │   ├── install-vpn.sh      # идемпотентная установка варианта «сайты за VPN»
 │   ├── check-vpn.sh        # диагностика VPN-варианта (read-only)
 │   ├── install-access-guard.sh   # защита от обхода Access (диапазоны CF + недельный таймер)
-│   └── install-access-verify.sh  # проверка Access-JWT на входе (forwardAuth)
+│   ├── install-access-verify.sh  # проверка Access-JWT на входе (forwardAuth)
+│   ├── install-vpn-trigger.sh    # флаг разрешения VPN для Windows (vpnwatch, vpn-window)
+│   ├── vpn-window                # команда флага: -2, -1, 0 или минуты
+│   └── windows/Check-VpnFlag.ps1 # минутная проверка флага на Windows: SoftEther + AnyDesk
 ├── examples/stub-site/     # сайт-заглушка для проверки
 └── examples/vpn-site-windows/  # эталон сайта на Windows за VPN
 ```
@@ -676,6 +679,111 @@ sudo ip link del tap_vpn
 Удалите (или закомментируйте) записи VPN-сайтов в `traefik/dynamic/vpn-sites.yml`.
 Ubuntu-сайты при откате не затрагиваются; файлы `softether/.env`, `softether/data/`,
 `softether/logs/` можно удалить, если вариант больше не нужен.
+
+## VPN по требованию (флаг разрешения)
+
+Дополнительный режим к схеме [«Сайты за VPN»](#сайты-за-vpn-softether): вторая
+Windows-машина держит SoftEther-подключение только пока на Ubuntu есть
+разрешение, а в аварийной ситуации вместо VPN поднимает портативный AnyDesk.
+Сайты на Ubuntu не затрагиваются.
+
+```
+Ubuntu /var/lib/vpn-trigger/win2.until   Windows №2
+0                                        VPN отключён, AnyDesk остановлен
+-1                                       VPN включён постоянно
+-2                                       VPN не меняется, запущен AnyDesk
+1..240 минут                             VPN включён до указанного времени
+```
+
+Задачу на Windows (`scripts/windows/Check-VpnFlag.ps1`) Планировщик запускает
+раз в минуту; она читает флаг по SSH под пользователем `vpnwatch` и кэширует
+последнее успешно полученное значение. Если SSH недоступен, действует кэш:
+`-1` продолжает держать VPN, `-2` — AnyDesk.
+
+### Ubuntu
+
+```bash
+sudo ./scripts/install-vpn-trigger.sh
+```
+
+Скрипт идемпотентен и:
+
+1. создаёт `/var/lib/vpn-trigger/win2.until` со значением `0` (существующее
+   значение не меняет);
+2. ставит команду `/usr/local/sbin/vpn-window`;
+3. заводит пользователя `vpnwatch` без пароля и с оболочкой `/bin/sh` — ему
+   разрешён только вход по ключу и только чтение флага.
+
+Публичный ключ с Windows (`C:\ProgramData\VpnTrigger\id_ed25519.pub`)
+добавляется одной командой:
+
+```bash
+sudo ./scripts/install-vpn-trigger.sh add-key 'ssh-ed25519 AAAA... win2-vpn-trigger'
+```
+
+Скрипт сам добавит ограничение
+`restrict,command="/usr/bin/cat /var/lib/vpn-trigger/win2.until"` и выставит
+права `root:vpnwatch 640`. Если в SSH включён `AllowUsers` или `AllowGroups`,
+он предупредит: добавьте `vpnwatch` в список и перезагрузите SSH.
+
+### Windows
+
+Однократная подготовка Windows (каталог, ключ, `ssh_config`, `known_hosts`,
+права `SYSTEM` на приватный ключ) — по гайду «SoftEther VPN по запросу»,
+части IV–VII. В `C:\ProgramData\VpnTrigger` положите:
+
+- `Check-VpnFlag.ps1` из `scripts/windows/`;
+- портативный `AnyDesk.exe` (путь меняется переменной `$AnyDeskExe`);
+- профиль SoftEther с именем из `$VpnConnectionName` (по умолчанию
+  `Ubuntu-Backup`).
+
+Затем зарегистрируйте задачу от `SYSTEM` раз в минуту (PowerShell от
+администратора):
+
+```powershell
+$Action = New-ScheduledTaskAction `
+  -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+  -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ProgramData\VpnTrigger\Check-VpnFlag.ps1"'
+
+$EveryMinute = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+  -RepetitionInterval (New-TimeSpan -Minutes 1)
+
+$Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+  -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 45) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+Register-ScheduledTask -TaskName "SoftEther-VpnTrigger" `
+  -Action $Action -Trigger @($EveryMinute, (New-ScheduledTaskTrigger -AtStartup)) `
+  -Settings $Settings `
+  -Principal (New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest) `
+  -Force
+```
+
+Перед первым запуском разрешите окно, иначе задача сразу отключит VPN:
+
+```bash
+sudo vpn-window 60
+```
+
+### Использование
+
+```bash
+sudo vpn-window 60    # разрешить на час
+sudo vpn-window 120   # продлить: срок считается от текущего момента
+sudo vpn-window -1    # включить навсегда (автоотключение выключено)
+sudo vpn-window -2    # аварийный режим: портативный AnyDesk
+sudo vpn-window 0     # выключить VPN и AnyDesk
+```
+
+- `-2` не трогает состояние VPN: если туннель для сайтов работает, он
+  продолжает работать. При следующем значении, отличном от `-2`, задача
+  завершает процесс `AnyDesk.exe` из `C:\ProgramData\VpnTrigger`.
+- AnyDesk запускается от `SYSTEM`: настройте в нём пароль unattended-доступа
+  и разрешите его в Windows Firewall, иначе подключиться не получится.
+- Срок из `1..240` не продлевается сам; истечение разрешения разрывает
+  активную RDP-сессию.
+- Время на Ubuntu и Windows должно быть синхронизировано.
+- Журнал Windows: `C:\ProgramData\VpnTrigger\watch.log`.
 
 ## Дашборд Traefik (опционально)
 

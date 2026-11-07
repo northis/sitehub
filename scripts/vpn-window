@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Set the VPN permission flag for the second Windows machine.
+#
+# The flag is read by scripts/windows/Check-VpnFlag.ps1 on Windows once a
+# minute. Values in /var/lib/vpn-trigger/win2.until:
+#   0     - VPN off, AnyDesk stopped
+#   -1    - VPN always on (auto-disconnect disabled)
+#   -2    - emergency: portable AnyDesk started, VPN state unchanged
+#   N     - VPN allowed until Unix time N, AnyDesk stopped
+#
+# Usage: sudo vpn-window {-2|-1|0|1..240}
+
+set -euo pipefail
+
+FLAG_DIR="/var/lib/vpn-trigger"
+FLAG_FILE="${FLAG_DIR}/win2.until"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Run with sudo" >&2
+    exit 1
+fi
+
+if [[ ! -d "$FLAG_DIR" ]]; then
+    echo "${FLAG_DIR} is missing; run 'sudo ./scripts/install-vpn-trigger.sh' first" >&2
+    exit 1
+fi
+
+value="${1:-}"
+
+case "$value" in
+    -2)
+        flag=-2
+        ;;
+    -1)
+        flag=-1
+        ;;
+    *)
+        if [[ ! "$value" =~ ^[0-9]{1,3}$ ]]; then
+            echo "Usage: vpn-window {-2|-1|0|1..240}" >&2
+            exit 1
+        fi
+
+        minutes=$((10#$value))
+
+        if (( minutes > 240 )); then
+            echo "Maximum: 240 minutes" >&2
+            exit 1
+        fi
+
+        flag=0
+        if (( minutes > 0 )); then
+            flag=$(( $(date +%s) + minutes * 60 ))
+        fi
+        ;;
+esac
+
+tmp=$(mktemp "${FLAG_DIR}/.win2.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+printf '%s\n' "$flag" > "$tmp"
+chmod 644 "$tmp"
+mv -f "$tmp" "$FLAG_FILE"
+
+case "$flag" in
+    -2)
+        echo "VPN: EMERGENCY (portable AnyDesk on Windows, VPN state unchanged)"
+        ;;
+    -1)
+        echo "VPN: ALWAYS ON (auto-disconnect disabled)"
+        ;;
+    0)
+        echo "VPN: OFF"
+        ;;
+    *)
+        echo "VPN allowed until: $(date -d "@$flag" --iso-8601=seconds)"
+        ;;
+esac
