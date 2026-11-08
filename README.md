@@ -684,7 +684,7 @@ Ubuntu-сайты при откате не затрагиваются; файл�
 
 Дополнительный режим к схеме [«Сайты за VPN»](#сайты-за-vpn-softether): вторая
 Windows-машина держит SoftEther-подключение только пока на Ubuntu есть
-разрешение, а в аварийной ситуации вместо VPN поднимает портативный AnyDesk.
+разрешение, а в аварийной ситуации вместо VPN запускает портативный AnyDesk.
 Сайты на Ubuntu не затрагиваются.
 
 ```
@@ -730,12 +730,45 @@ sudo ./scripts/install-vpn-trigger.sh add-key 'ssh-ed25519 AAAA... win2-vpn-trig
 
 Однократная подготовка Windows (каталог, ключ, `ssh_config`, `known_hosts`,
 права `SYSTEM` на приватный ключ) — по гайду «SoftEther VPN по запросу»,
-части IV–VII. В `C:\ProgramData\VpnTrigger` положите:
+части IV–VII. В `C:\ProgramData\VpnTrigger` положите `Check-VpnFlag.ps1` из
+`scripts/windows/`, портативный `AnyDesk.exe` (путь меняется переменной
+`$AnyDeskExe`) и профиль SoftEther с именем `$VpnConnectionName` (по умолчанию
+`Ubuntu-Backup`).
 
-- `Check-VpnFlag.ps1` из `scripts/windows/`;
-- портативный `AnyDesk.exe` (путь меняется переменной `$AnyDeskExe`);
-- профиль SoftEther с именем из `$VpnConnectionName` (по умолчанию
-  `Ubuntu-Backup`).
+По `-2` скрипт находит залогиненного пользователя и создаёт/переиспользует
+задачу `SiteHub-AnyDeskEmergency` с `-LogonType Interactive`, затем запускает
+её: портативный AnyDesk — GUI-приложение, и из задачи `SYSTEM` (session 0) он
+сразу завершается. Пользователь определяется так:
+
+- сначала консольная сессия (`Win32_ComputerSystem.UserName`);
+- если вход по RDP, консольного пользователя нет — берётся владелец
+  `explorer.exe` из RDP-сессии;
+- можно вообще отключить поиск: впишите в начале `Check-VpnFlag.ps1`
+  `$AnyDeskUser = "WIN2\user"` или создайте задачу заранее.
+
+Заранее созданная задача — самый надёжный путь для RDP, скрипт тогда только
+запускает её:
+
+```powershell
+$Action = New-ScheduledTaskAction `
+  -Execute "C:\ProgramData\VpnTrigger\AnyDesk.exe" `
+  -WorkingDirectory "C:\ProgramData\VpnTrigger"
+$Principal = New-ScheduledTaskPrincipal -UserId "WIN2\user" -LogonType Interactive -RunLevel Highest
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+  -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+Register-ScheduledTask -TaskName "SiteHub-AnyDeskEmergency" `
+  -Action $Action -Principal $Principal -Settings $Settings -Force
+```
+
+`WIN2\user` — та учётная запись, под которой вы входите по RDP. Триггера у
+задачи нет: она запускается только скриптом. Пароль unattended-доступа задайте
+в AnyDesk под этим же пользователем (Settings → Access → Unattended Access),
+разрешите AnyDesk в Windows Firewall. При любом значении флага, отличном от
+`-2`, скрипт завершает процесс и **удаляет задачу**; при следующем `-2` она
+создастся заново (автоопределением или по `$AnyDeskUser`). Заранее созданная
+задача тоже удаляется — это ожидаемо.
 
 Затем зарегистрируйте задачу от `SYSTEM` раз в минуту (PowerShell от
 администратора):
@@ -778,8 +811,14 @@ sudo vpn-window 0     # выключить VPN и AnyDesk
 - `-2` не трогает состояние VPN: если туннель для сайтов работает, он
   продолжает работать. При следующем значении, отличном от `-2`, задача
   завершает процесс `AnyDesk.exe` из `C:\ProgramData\VpnTrigger`.
-- AnyDesk запускается от `SYSTEM`: настройте в нём пароль unattended-доступа
-  и разрешите его в Windows Firewall, иначе подключиться не получится.
+- Портативный AnyDesk запускается в интерактивной сессии залогиненного
+  пользователя через задачу `SiteHub-AnyDeskEmergency`: задача от `SYSTEM`
+  работает в session 0, где GUI-приложение сразу завершается. Скрипт находит
+  и консольного, и RDP-пользователя, либо использует `$AnyDeskUser` /
+  заранее созданную задачу. При уходе с `-2` задача удаляется. Пароль
+  unattended-доступа задаётся в AnyDesk под этим же пользователем, AnyDesk
+  должен быть разрешён в Windows Firewall. Для доступа на экране входа нужен
+  уже установленный AnyDesk с его службой.
 - Срок из `1..240` не продлевается сам; истечение разрешения разрывает
   активную RDP-сессию.
 - Время на Ubuntu и Windows должно быть синхронизировано.

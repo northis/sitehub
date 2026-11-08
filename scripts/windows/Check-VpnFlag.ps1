@@ -18,6 +18,10 @@ $VpnConnectionName = "Ubuntu-Backup"
 $VpnCmd = "C:\Program Files\SoftEther VPN Client\vpncmd_x64.exe"
 $Ssh = "$env:WINDIR\System32\OpenSSH\ssh.exe"
 $AnyDeskExe = "$Dir\AnyDesk.exe"
+$AnyDeskTaskName = "SiteHub-AnyDeskEmergency"
+# Optional: pin the account that owns the interactive session. Empty means
+# detect the console user, then an RDP user through explorer.exe.
+$AnyDeskUser = ""
 
 # Last successfully read flag: a mode marker or a Unix deadline.
 $StateFile = "$Dir\allowed-until.txt"
@@ -81,35 +85,108 @@ function Invoke-Tool {
     }
 }
 
-# Starts or stops only the portable AnyDesk from $AnyDeskExe; a separately
-# installed AnyDesk is left alone.
-function Set-AnyDesk {
-    param([bool]$Enable)
-
+function Get-AnyDeskProcess {
     $processName = [IO.Path]::GetFileNameWithoutExtension($AnyDeskExe)
 
-    $running = @(
+    @(
         Get-Process -Name $processName -ErrorAction SilentlyContinue |
             Where-Object {
                 try { $_.Path -eq $AnyDeskExe }
                 catch { $false }
             }
     )
+}
 
-    if ($Enable) {
-        if ($running.Count -gt 0) {
+# Win32_ComputerSystem reports the console session only, so an RDP login is
+# invisible there. The shell process of the session does expose its owner.
+function Get-InteractiveUser {
+    if (-not [string]::IsNullOrWhiteSpace($AnyDeskUser)) {
+        return $AnyDeskUser
+    }
+
+    $consoleUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if (-not [string]::IsNullOrWhiteSpace($consoleUser)) {
+        return $consoleUser
+    }
+
+    $shell = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.SessionId -ne 0 -and
+            -not [string]::IsNullOrWhiteSpace($_.UserName)
+        } |
+        Sort-Object SessionId -Descending |
+        Select-Object -First 1
+
+    if ($shell) {
+        return $shell.UserName
+    }
+
+    return $null
+}
+
+# A portable AnyDesk is an interactive GUI app: started by a SYSTEM task it
+# lands in session 0 and exits at once. Register a one-shot task for the
+# logged-on user and start that; the process then belongs to their session.
+function Start-AnyDesk {
+    if ((Get-AnyDeskProcess).Count -gt 0) {
+        return
+    }
+    if (-not (Test-Path $AnyDeskExe)) {
+        throw "AnyDesk not found: $AnyDeskExe"
+    }
+
+    # A task prepared in advance already knows its user; then no detection is
+    # needed at all, which is the reliable path for an RDP-only session.
+    $task = Get-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
+
+    if (-not $task) {
+        $user = Get-InteractiveUser
+        if ([string]::IsNullOrWhiteSpace($user)) {
+            throw "No interactive user is logged on; set `$AnyDeskUser or create the ${AnyDeskTaskName} task in advance"
+        }
+
+        $action = New-ScheduledTaskAction -Execute $AnyDeskExe -WorkingDirectory $Dir
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+        Register-ScheduledTask -TaskName $AnyDeskTaskName -Action $action `
+            -Principal $principal -Settings $settings -Force | Out-Null
+    }
+    else {
+        $user = $task.Principal.UserId
+    }
+
+    Start-ScheduledTask -TaskName $AnyDeskTaskName
+
+    # Give AnyDesk time to initialize and catch a launcher that exits at once.
+    Start-Sleep -Seconds 2
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-AnyDeskProcess).Count -gt 0) {
+            Write-Log "AnyDesk started in the interactive session of ${user}"
             return
         }
-        if (-not (Test-Path $AnyDeskExe)) {
-            throw "AnyDesk not found: $AnyDeskExe"
-        }
-
-        Start-Process -FilePath $AnyDeskExe -WorkingDirectory $Dir | Out-Null
-        Write-Log "AnyDesk started: emergency flag -2"
+        Start-Sleep -Milliseconds 500
     }
-    elseif ($running.Count -gt 0) {
+
+    $info = Get-ScheduledTaskInfo -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
+    $result = if ($info) { $info.LastTaskResult } else { "unknown" }
+    throw "AnyDesk did not start (task result ${result}); check that a user is logged on"
+}
+
+function Stop-AnyDesk {
+    $running = @(Get-AnyDeskProcess)
+    if ($running.Count -gt 0) {
         $running | Stop-Process -Force
         Write-Log "AnyDesk stopped: flag is no longer -2"
+    }
+
+    # The one-shot task is recreated on the next -2, so do not leave it behind.
+    if (Get-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $AnyDeskTaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
 }
 
@@ -167,11 +244,11 @@ try {
 
     # -2 is an AnyDesk-only mode: do not touch a working VPN.
     if ($flag -eq -2) {
-        Set-AnyDesk -Enable $true
+        Start-AnyDesk
         exit 0
     }
 
-    Set-AnyDesk -Enable $false
+    Stop-AnyDesk
 
     if (-not (Test-Path $VpnCmd)) {
         throw "vpncmd.exe not found: $VpnCmd"
