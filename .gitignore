@@ -13,3 +13,5 @@ examples/test/*
 backup_all.cmd
 backup_all.ps1
 backup_all.log
+install_backup_task.ps1
+__pycache__/
