@@ -98,6 +98,9 @@ try {
     }
     if (-not $dockerUp) { Write-Warning 'Docker Desktop is not answering; the container projects will fail' }
 
+    $squashLater = @()
+    $copyFailed = $false
+
     foreach ($project in $projects) {
         $local = Join-Path $project.Dir $project.Backups
         $remote = Join-Path $dest $project.Name
@@ -132,14 +135,31 @@ try {
         robocopy $local $remote *.zip *.json /XF merged-*.zip /XO /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
         if ($LASTEXITCODE -ge 8) {
             Write-Warning "$($project.Name): copy to $remote failed (robocopy $LASTEXITCODE), nothing squashed"
+            $copyFailed = $true
             continue
         }
-        # Bit 1 of the robocopy exit code: files were copied, so the new data is on the
-        # share and the local increments can be folded into one archive.
-        if ($LASTEXITCODE -band 1 -and $python -and (Test-Path -LiteralPath $squash)) {
-            Write-Host "-- squashing $($project.Name)"
-            $code = Invoke-BackupCommand @($python, $squash, $local, '--delete')
-            if ($code -ne 0) { Write-Warning "$($project.Name): squash exited $code" }
+        # Bit 1 of the robocopy exit code: files were copied, so this project has new data
+        # on the share and its local increments can be folded later.
+        if ($LASTEXITCODE -band 1) { $squashLater += $project }
+    }
+
+    # The squash runs after every upload on purpose: the share is no longer needed for
+    # it, so the session can be disconnected as soon as the line below appears.
+    if ($squashLater.Count -gt 0) {
+        if (-not $copyFailed) {
+            Write-Host 'All new archives are on the share: it is safe to disconnect it now.'
+        }
+        if ($python -and (Test-Path -LiteralPath $squash)) {
+            foreach ($project in $squashLater) {
+                $local = Join-Path $project.Dir $project.Backups
+                Write-Host "-- squashing $($project.Name)"
+                try {
+                    $code = Invoke-BackupCommand @($python, $squash, $local, '--delete')
+                    if ($code -ne 0) { Write-Warning "$($project.Name): squash exited $code" }
+                } catch {
+                    Write-Warning "$($project.Name): squash failed: $_"
+                }
+            }
         }
     }
 } finally {
