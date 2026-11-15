@@ -10,3 +10,6 @@ softether/.env
 softether/data/
 softether/logs/
 examples/test/*
+backup_all.cmd
+backup_all.ps1
+backup_all.log
