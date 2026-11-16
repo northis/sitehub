@@ -3,10 +3,11 @@
 # SoftEther VPN client and the portable AnyDesk on this Windows machine.
 #
 # Flag values (see README):
-#    0  - VPN off, AnyDesk stopped
+#    0  - VPN off, AnyDesk stopped and our service removed
 #   -1  - VPN always on
 #   -2  - emergency: portable AnyDesk started, VPN state unchanged
-#    N  - VPN allowed until Unix time N, AnyDesk stopped
+#   -3  - emergency: AnyDesk installed as a service, VPN state unchanged
+#    N  - VPN allowed until Unix time N, AnyDesk stopped and our service removed
 #
 # The scheduled task runs this script as SYSTEM once a minute. When the flag
 # cannot be read, the last successfully read value is used.
@@ -22,6 +23,10 @@ $AnyDeskTaskName = "SiteHub-AnyDeskEmergency"
 # Optional: pin the account that owns the interactive session. Empty means
 # detect the console user, then an RDP user through explorer.exe.
 $AnyDeskUser = ""
+# Installed mode used by -3: the source exe above installs itself here.
+$AnyDeskService = "AnyDesk"
+$AnyDeskInstallDir = "$Dir\AnyDesk"
+$AnyDeskInstalledExe = "$AnyDeskInstallDir\AnyDesk.exe"
 
 # Last successfully read flag: a mode marker or a Unix deadline.
 $StateFile = "$Dir\allowed-until.txt"
@@ -190,6 +195,129 @@ function Stop-AnyDesk {
     }
 }
 
+function Get-AnyDeskService {
+    Get-CimInstance Win32_Service -Filter "Name='$AnyDeskService'" -ErrorAction SilentlyContinue
+}
+
+function Get-AnyDeskServicePath {
+    param($Service)
+
+    if ([string]::IsNullOrWhiteSpace($Service.PathName)) {
+        return $null
+    }
+    if ($Service.PathName -match '^"([^"]+)"') {
+        return $matches[1]
+    }
+    return ($Service.PathName -split '\s+', 2)[0]
+}
+
+# True only for a service created from our source exe or our install dir.
+# A pre-existing AnyDesk installation elsewhere is never touched.
+function Test-AnyDeskOwnService {
+    param($Service)
+
+    $path = Get-AnyDeskServicePath $Service
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $false
+    }
+    if ($path -eq $AnyDeskExe) {
+        return $true
+    }
+
+    $prefix = $AnyDeskInstallDir.TrimEnd('\') + '\'
+    return $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Wait-AnyDeskService {
+    param(
+        [bool]$Present,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $service = Get-AnyDeskService
+        if ($Present -and $service) {
+            return $service
+        }
+        if (-not $Present -and -not $service) {
+            return $null
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return (Get-AnyDeskService)
+}
+
+function Install-AnyDeskService {
+    $service = Get-AnyDeskService
+    if ($service -and -not (Test-AnyDeskOwnService $service)) {
+        return
+    }
+
+    if (-not $service) {
+        if (-not (Test-Path $AnyDeskExe)) {
+            throw "AnyDesk installer not found: $AnyDeskExe"
+        }
+
+        $install = Start-Process -FilePath $AnyDeskExe `
+            -ArgumentList @('--install', $AnyDeskInstallDir, '--silent') `
+            -Wait -PassThru -WindowStyle Hidden
+        $service = Wait-AnyDeskService -Present $true
+        if (-not $service) {
+            throw "AnyDesk service did not appear after install (exit $($install.ExitCode))"
+        }
+        if (-not (Test-AnyDeskOwnService $service)) {
+            $path = Get-AnyDeskServicePath $service
+            throw "AnyDesk service appeared with unexpected path: $path"
+        }
+        Write-Log "AnyDesk service installed from $AnyDeskExe"
+    }
+
+    if ($service.StartMode -ne "Manual") {
+        Set-Service -Name $AnyDeskService -StartupType Manual
+    }
+    if ($service.State -ne "Running") {
+        Start-Service -Name $AnyDeskService
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            $service = Get-AnyDeskService
+            if ($service -and $service.State -eq "Running") {
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $deadline)
+        if (-not $service -or $service.State -ne "Running") {
+            throw "AnyDesk service did not start"
+        }
+        Write-Log "AnyDesk service started"
+    }
+}
+
+function Remove-AnyDeskService {
+    $service = Get-AnyDeskService
+    if (-not $service) {
+        return
+    }
+    if (-not (Test-AnyDeskOwnService $service)) {
+        return
+    }
+
+    Stop-Service -Name $AnyDeskService -Force -ErrorAction SilentlyContinue
+    $uninstaller = if (Test-Path $AnyDeskInstalledExe) { $AnyDeskInstalledExe } else { $AnyDeskExe }
+    if (-not (Test-Path $uninstaller)) {
+        throw "AnyDesk uninstaller not found: $uninstaller"
+    }
+
+    Start-Process -FilePath $uninstaller -ArgumentList '--remove' `
+        -Wait -PassThru -WindowStyle Hidden | Out-Null
+
+    $service = Wait-AnyDeskService -Present $false
+    if ($service) {
+        throw "AnyDesk service is still registered after --remove"
+    }
+    Write-Log "AnyDesk service removed"
+}
+
 try {
     if ([string]::IsNullOrWhiteSpace($VpnConnectionName)) {
         throw "VPN connection name is empty."
@@ -242,12 +370,20 @@ try {
         Write-Log "Flag read failed: $($_.Exception.Message)"
     }
 
-    # -2 is an AnyDesk-only mode: do not touch a working VPN.
+    # -2 and -3 are AnyDesk-only modes: do not touch a working VPN.
+    if ($flag -eq -3) {
+        Stop-AnyDesk
+        Install-AnyDeskService
+        exit 0
+    }
+
     if ($flag -eq -2) {
+        Remove-AnyDeskService
         Start-AnyDesk
         exit 0
     }
 
+    Remove-AnyDeskService
     Stop-AnyDesk
 
     if (-not (Test-Path $VpnCmd)) {

@@ -126,7 +126,7 @@ print_summary() {
   printf '\n== Summary ==\n'
   echo "VPN trigger installed."
   echo
-  echo "- Flag:    ${FLAG_FILE} (0 = off, -1 = always on, -2 = AnyDesk emergency)"
+  echo "- Flag:    ${FLAG_FILE} (0 = off, -1 = always on, -2 = portable AnyDesk, -3 = AnyDesk service)"
   echo "- Command: sudo vpn-window {-2|-1|0|1..240}"
   echo "- Reader:  user ${WATCH_USER}, key may only run 'cat ${FLAG_FILE}'"
   echo
