@@ -5,7 +5,7 @@ grows with each run. This folds all increments of one folder into one archive: t
 copy of every file, the newest database, and the files that were deleted later
 (soundsave keeps those in deleted.txt). The full backup is never touched.
 
-One merged archive stops at --max-size-mb (5 GiB by default). A merged archive that is at
+One merged archive stops at --max-size-mb (2 GiB by default). A merged archive that is at
 the cap stays as it is, and the next merge starts a new one beside it:
 
     full backup  +  merged-1  +  merged-2  +  increments taken after the last merge
@@ -137,8 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("folder", type=Path, help="folder with the incremental *.zip archives")
     parser.add_argument("--delete", action="store_true",
                         help="delete the merged archives once the result verifies")
-    parser.add_argument("--max-size-mb", type=int, default=5120,
-                        help="cap of one merged archive in MiB (default 5120 = 5 GiB)")
+    parser.add_argument("--max-size-mb", type=int, default=2048,
+                        help="cap of one merged archive in MiB (default 2048 = 2 GiB)")
     args = parser.parse_args(argv)
 
     limit = args.max_size_mb * CHUNK
