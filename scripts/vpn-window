@@ -3,13 +3,12 @@
 #
 # The flag is read by scripts/windows/Check-VpnFlag.ps1 on Windows once a
 # minute. Values in /var/lib/vpn-trigger/win2.until:
-#   0     - VPN off, AnyDesk stopped and our service removed
-#   -1    - VPN always on (auto-disconnect disabled)
-#   -2    - emergency: portable AnyDesk started, VPN state unchanged
-#   -3    - emergency: AnyDesk installed as a service, VPN state unchanged
-#   N     - VPN allowed until Unix time N, AnyDesk stopped and service removed
+#   0     - VPN off; AnyDesk service stopped and disabled
+#   -1    - VPN always on; AnyDesk service stopped and disabled
+#   -2    - emergency: AnyDesk service started, VPN state unchanged
+#   N     - VPN allowed until Unix time N; AnyDesk service stopped and disabled
 #
-# Usage: sudo vpn-window {-3|-2|-1|0|1..240}
+# Usage: sudo vpn-window {-2|-1|0|1..240}
 
 set -euo pipefail
 
@@ -29,9 +28,6 @@ fi
 value="${1:-}"
 
 case "$value" in
-    -3)
-        flag=-3
-        ;;
     -2)
         flag=-2
         ;;
@@ -40,7 +36,7 @@ case "$value" in
         ;;
     *)
         if [[ ! "$value" =~ ^[0-9]{1,3}$ ]]; then
-            echo "Usage: vpn-window {-3|-2|-1|0|1..240}" >&2
+            echo "Usage: vpn-window {-2|-1|0|1..240}" >&2
             exit 1
         fi
 
@@ -66,19 +62,16 @@ chmod 644 "$tmp"
 mv -f "$tmp" "$FLAG_FILE"
 
 case "$flag" in
-    -3)
-        echo "VPN: SERVICE (AnyDesk service on Windows, VPN state unchanged)"
-        ;;
     -2)
-        echo "VPN: EMERGENCY (portable AnyDesk on Windows, VPN state unchanged)"
+        echo "VPN: EMERGENCY (AnyDesk service will be started on Windows, VPN state unchanged)"
         ;;
     -1)
-        echo "VPN: ALWAYS ON (auto-disconnect disabled)"
+        echo "VPN: ALWAYS ON (auto-disconnect disabled; AnyDesk service will be disabled)"
         ;;
     0)
-        echo "VPN: OFF"
+        echo "VPN: OFF (AnyDesk service will be disabled)"
         ;;
     *)
-        echo "VPN allowed until: $(date -d "@$flag" --iso-8601=seconds)"
+        echo "VPN allowed until: $(date -d "@$flag" --iso-8601=seconds) (AnyDesk service will be disabled)"
         ;;
 esac

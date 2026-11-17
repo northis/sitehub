@@ -684,22 +684,22 @@ Ubuntu-сайты при откате не затрагиваются; файл�
 
 Дополнительный режим к схеме [«Сайты за VPN»](#сайты-за-vpn-softether): вторая
 Windows-машина держит SoftEther-подключение только пока на Ubuntu есть
-разрешение, а в аварийной ситуации вместо VPN поднимает AnyDesk: портативный
-(`-2`) или установленный службой (`-3`). Сайты на Ubuntu не затрагиваются.
+разрешение, а в аварийной ситуации включает службу AnyDesk (`-2`), а на
+обычных значениях держит её остановленной и `Disabled`. Сайты на Ubuntu не
+затрагиваются.
 
 ```
 Ubuntu /var/lib/vpn-trigger/win2.until   Windows №2
-0                                        VPN отключён, AnyDesk остановлен, наша служба удалена
--1                                       VPN включён постоянно
--2                                       VPN не меняется, запущен портативный AnyDesk
--3                                       VPN не меняется, AnyDesk установлен службой
-1..240 минут                             VPN включён до указанного времени
+0                                        VPN отключён; служба AnyDesk остановлена и Disabled
+-1                                       VPN включён постоянно; служба AnyDesk остановлена и Disabled
+-2                                       VPN не меняется; служба AnyDesk запущена
+1..240 минут                             VPN включён до указанного времени; служба AnyDesk остановлена и Disabled
 ```
 
 Задачу на Windows (`scripts/windows/Check-VpnFlag.ps1`) Планировщик запускает
 раз в минуту; она читает флаг по SSH под пользователем `vpnwatch` и кэширует
 последнее успешно полученное значение. Если SSH недоступен, действует кэш:
-`-1` продолжает держать VPN, `-2` — портативный AnyDesk, `-3` — службу AnyDesk.
+`-1` продолжает держать VPN, `-2` — службу AnyDesk.
 
 ### Ubuntu
 
@@ -732,64 +732,34 @@ sudo ./scripts/install-vpn-trigger.sh add-key 'ssh-ed25519 AAAA... win2-vpn-trig
 Однократная подготовка Windows (каталог, ключ, `ssh_config`, `known_hosts`,
 права `SYSTEM` на приватный ключ) — по гайду «SoftEther VPN по запросу»,
 части IV–VII. В `C:\ProgramData\VpnTrigger` положите `Check-VpnFlag.ps1` из
-`scripts/windows/`, портативный `AnyDesk.exe` (путь меняется переменной
-`$AnyDeskExe`) и профиль SoftEther с именем `$VpnConnectionName` (по умолчанию
-`Ubuntu-Backup`).
+`scripts/windows/`; профиль SoftEther должен называться как
+`$VpnConnectionName` (по умолчанию `Ubuntu-Backup`).
 
-#### Режим `-2`: портативный AnyDesk
-
-По `-2` скрипт находит залогиненного пользователя и создаёт/переиспользует
-задачу `SiteHub-AnyDeskEmergency` с `-LogonType Interactive`, затем запускает
-её: портативный AnyDesk — GUI-приложение, и из задачи `SYSTEM` (session 0) он
-сразу завершается. Пользователь определяется так:
-
-- сначала консольная сессия (`Win32_ComputerSystem.UserName`);
-- если вход по RDP, консольного пользователя нет — берётся владелец
-  `explorer.exe` из RDP-сессии;
-- можно вообще отключить поиск: впишите в начале `Check-VpnFlag.ps1`
-  `$AnyDeskUser = "WIN2\user"` или создайте задачу заранее.
-
-Заранее созданная задача — самый надёжный путь для RDP, скрипт тогда только
-запускает её:
+На Windows должен быть установлен AnyDesk **как служба** — любым установщиком,
+по любому пути:
 
 ```powershell
-$Action = New-ScheduledTaskAction `
-  -Execute "C:\ProgramData\VpnTrigger\AnyDesk.exe" `
-  -WorkingDirectory "C:\ProgramData\VpnTrigger"
-$Principal = New-ScheduledTaskPrincipal -UserId "WIN2\user" -LogonType Interactive -RunLevel Highest
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-  -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-  -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-Register-ScheduledTask -TaskName "SiteHub-AnyDeskEmergency" `
-  -Action $Action -Principal $Principal -Settings $Settings -Force
+Get-Service AnyDesk | Select-Object Name,Status,StartType
 ```
 
-`WIN2\user` — та учётная запись, под которой вы входите по RDP. Триггера у
-задачи нет: она запускается только скриптом. Пароль unattended-доступа задайте
-в AnyDesk под этим же пользователем (Settings → Access → Unattended Access),
-разрешите AnyDesk в Windows Firewall. При любом значении флага, отличном от
-`-2`, скрипт завершает процесс и **удаляет задачу**; при следующем `-2` она
-создастся заново (автоопределением или по `$AnyDeskUser`). Заранее созданная
-задача тоже удаляется — это ожидаемо.
+Скрипт службу не устанавливает и не удаляет: он только запускает её на `-2`
+и останавливает/переводит в `Disabled` на остальных значениях.
 
-#### Режим `-3`: AnyDesk службой
+#### Служба AnyDesk
 
-По `-3` скрипт использует `C:\ProgramData\VpnTrigger\AnyDesk.exe` как установщик:
-раскладывает его в `C:\ProgramData\VpnTrigger\AnyDesk`, ставит службу `AnyDesk`,
-переводит её в ручной запуск и запускает. Служба работает без залогиненного
-пользователя, в том числе на экране входа. Пароль unattended-доступа задайте
-в установленном AnyDesk (Settings → Access → Unattended Access).
-
-При `-2` и при любом обычном значении (`0`, `-1`, минуты) наша служба
-останавливается и удаляется через `AnyDesk.exe --remove`; портативный AnyDesk
-при этом тоже останавливается. Если служба AnyDesk уже установлена по другому
-пути (например, `C:\Program Files (x86)\AnyDesk`), скрипт её не трогает: не
-ставит свою и не удаляет чужую. Если у кастомного клиента другое имя службы,
-поправьте `$AnyDeskService` в начале скрипта.
-
-Для `-3` в `C:\ProgramData\VpnTrigger` достаточно положить `AnyDesk.exe` —
-он же используется как установщик.
+- `-2`: если служба `Disabled`, скрипт переводит её в `Manual`, запускает и
+  проверяет `Running`. VPN не трогает.
+- `0`, `-1` и минуты: скрипт останавливает службу и переводит её в `Disabled`;
+  дальше VPN работает по флагу (`-1` — постоянно, `0` — выключен, минуты —
+  окно).
+- Служба управляется по имени `AnyDesk`, путь установки не важен. Если у
+  кастомного клиента другое имя — поправьте `$AnyDeskService` в начале
+  `Check-VpnFlag.ps1`.
+- Если службы нет: на `-2` в журнал пишется ошибка, на остальных значениях
+  скрипт просто не трогает AnyDesk.
+- Пароль unattended-доступа задайте один раз в AnyDesk (Settings → Access →
+  Unattended Access). Служба работает без залогиненного пользователя, в том
+  числе на экране входа.
 
 #### Общая задача-триггер
 
@@ -827,28 +797,15 @@ sudo vpn-window 60
 sudo vpn-window 60    # разрешить на час
 sudo vpn-window 120   # продлить: срок считается от текущего момента
 sudo vpn-window -1    # включить навсегда (автоотключение выключено)
-sudo vpn-window -2    # аварийный режим: портативный AnyDesk
-sudo vpn-window -3    # аварийный режим: AnyDesk службой
-sudo vpn-window 0     # выключить VPN и AnyDesk
+sudo vpn-window -2    # аварийный режим: запустить службу AnyDesk
+sudo vpn-window 0     # выключить VPN; службу AnyDesk остановить и Disabled
 ```
 
-- `-2` не трогает состояние VPN: если туннель для сайтов работает, он
-  продолжает работать. При уходе с `-2` задача завершает процесс `AnyDesk.exe`
-  из `C:\ProgramData\VpnTrigger` и удаляет вспомогательную задачу; наша служба
-  AnyDesk при этом тоже удаляется.
-- Портативный AnyDesk запускается в интерактивной сессии залогиненного
-  пользователя через задачу `SiteHub-AnyDeskEmergency`: задача от `SYSTEM`
-  работает в session 0, где GUI-приложение сразу завершается. Скрипт находит
-  и консольного, и RDP-пользователя, либо использует `$AnyDeskUser` /
-  заранее созданную задачу. При уходе с `-2` задача удаляется. Пароль
-  unattended-доступа задаётся в AnyDesk под этим же пользователем, AnyDesk
-  должен быть разрешён в Windows Firewall. Для доступа без залогиненного
-  пользователя используйте `-3`.
-- `-3` ставит AnyDesk службой из `C:\ProgramData\VpnTrigger\AnyDesk.exe`
-  в `C:\ProgramData\VpnTrigger\AnyDesk`, запускает службу и переводит её в
-  Manual. VPN не трогается. Служба работает без залогиненного пользователя,
-  в том числе на экране входа. При `-2` и любом обычном значении наша служба
-  удаляется; чужая служба AnyDesk (по другому пути) не трогается.
+- `-2` не трогает состояние VPN: запускает службу `AnyDesk`. Если она была
+  `Disabled`, скрипт переводит её в `Manual` и запускает.
+- `-1`, `0` и минуты останавливают службу `AnyDesk` и переводят её в
+  `Disabled`; дальше VPN работает по флагу. Служба управляется по имени,
+  путь установки не важен.
 - Срок из `1..240` не продлевается сам; истечение разрешения разрывает
   активную RDP-сессию.
 - Время на Ubuntu и Windows должно быть синхронизировано.

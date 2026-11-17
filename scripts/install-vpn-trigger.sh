@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SiteHub VPN trigger installer: the permission flag that lets a Windows
-# machine bring its SoftEther connection up only on demand, and start a
-# portable AnyDesk for emergency access.
+# machine bring its SoftEther connection up only on demand, and start the
+# AnyDesk service for emergency access.
 #
 # Idempotent: every step detects prior completion and skips, so the script
 # is safe to re-run. Guarantees: never changes an existing flag value,
@@ -126,13 +126,13 @@ print_summary() {
   printf '\n== Summary ==\n'
   echo "VPN trigger installed."
   echo
-  echo "- Flag:    ${FLAG_FILE} (0 = off, -1 = always on, -2 = portable AnyDesk, -3 = AnyDesk service)"
+  echo "- Flag:    ${FLAG_FILE} (-2 = AnyDesk service started; 0/-1/minutes = service disabled)"
   echo "- Command: sudo vpn-window {-2|-1|0|1..240}"
   echo "- Reader:  user ${WATCH_USER}, key may only run 'cat ${FLAG_FILE}'"
   echo
   echo "Next steps:"
-  echo "1. On Windows copy scripts/windows/Check-VpnFlag.ps1 and the portable"
-  echo "   AnyDesk.exe to C:\\ProgramData\\VpnTrigger (see README)."
+  echo "1. On Windows copy scripts/windows/Check-VpnFlag.ps1 to"
+  echo "   C:\\ProgramData\\VpnTrigger and install AnyDesk as a service (README)."
   echo "2. Add the Windows public key:"
   echo "   sudo ./scripts/install-vpn-trigger.sh add-key '<key>'"
   echo "3. Allow a window before enabling the scheduled task: sudo vpn-window 60"

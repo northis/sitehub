@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 # SiteHub VPN trigger: reads the permission flag from Ubuntu and drives the
-# SoftEther VPN client and the portable AnyDesk on this Windows machine.
+# SoftEther VPN client and the AnyDesk service on this Windows machine.
 #
 # Flag values (see README):
-#    0  - VPN off, AnyDesk stopped and our service removed
-#   -1  - VPN always on
-#   -2  - emergency: portable AnyDesk started, VPN state unchanged
-#   -3  - emergency: AnyDesk installed as a service, VPN state unchanged
-#    N  - VPN allowed until Unix time N, AnyDesk stopped and our service removed
+#    0  - VPN off; AnyDesk service stopped and disabled
+#   -1  - VPN always on; AnyDesk service stopped and disabled
+#   -2  - emergency: AnyDesk service started (enabled if it was disabled);
+#         VPN state unchanged
+#    N  - VPN allowed until Unix time N; AnyDesk service stopped and disabled
 #
 # The scheduled task runs this script as SYSTEM once a minute. When the flag
 # cannot be read, the last successfully read value is used.
@@ -18,15 +18,9 @@ $Dir = "C:\ProgramData\VpnTrigger"
 $VpnConnectionName = "Ubuntu-Backup"
 $VpnCmd = "C:\Program Files\SoftEther VPN Client\vpncmd_x64.exe"
 $Ssh = "$env:WINDIR\System32\OpenSSH\ssh.exe"
-$AnyDeskExe = "$Dir\AnyDesk.exe"
-$AnyDeskTaskName = "SiteHub-AnyDeskEmergency"
-# Optional: pin the account that owns the interactive session. Empty means
-# detect the console user, then an RDP user through explorer.exe.
-$AnyDeskUser = ""
-# Installed mode used by -3: the source exe above installs itself here.
+
+# Managed by name; the service installation path does not matter.
 $AnyDeskService = "AnyDesk"
-$AnyDeskInstallDir = "$Dir\AnyDesk"
-$AnyDeskInstalledExe = "$AnyDeskInstallDir\AnyDesk.exe"
 
 # Last successfully read flag: a mode marker or a Unix deadline.
 $StateFile = "$Dir\allowed-until.txt"
@@ -90,232 +84,57 @@ function Invoke-Tool {
     }
 }
 
-function Get-AnyDeskProcess {
-    $processName = [IO.Path]::GetFileNameWithoutExtension($AnyDeskExe)
-
-    @(
-        Get-Process -Name $processName -ErrorAction SilentlyContinue |
-            Where-Object {
-                try { $_.Path -eq $AnyDeskExe }
-                catch { $false }
-            }
-    )
-}
-
-# Win32_ComputerSystem reports the console session only, so an RDP login is
-# invisible there. The shell process of the session does expose its owner.
-function Get-InteractiveUser {
-    if (-not [string]::IsNullOrWhiteSpace($AnyDeskUser)) {
-        return $AnyDeskUser
-    }
-
-    $consoleUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
-    if (-not [string]::IsNullOrWhiteSpace($consoleUser)) {
-        return $consoleUser
-    }
-
-    $shell = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.SessionId -ne 0 -and
-            -not [string]::IsNullOrWhiteSpace($_.UserName)
-        } |
-        Sort-Object SessionId -Descending |
-        Select-Object -First 1
-
-    if ($shell) {
-        return $shell.UserName
-    }
-
-    return $null
-}
-
-# A portable AnyDesk is an interactive GUI app: started by a SYSTEM task it
-# lands in session 0 and exits at once. Register a one-shot task for the
-# logged-on user and start that; the process then belongs to their session.
-function Start-AnyDesk {
-    if ((Get-AnyDeskProcess).Count -gt 0) {
-        return
-    }
-    if (-not (Test-Path $AnyDeskExe)) {
-        throw "AnyDesk not found: $AnyDeskExe"
-    }
-
-    # A task prepared in advance already knows its user; then no detection is
-    # needed at all, which is the reliable path for an RDP-only session.
-    $task = Get-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
-
-    if (-not $task) {
-        $user = Get-InteractiveUser
-        if ([string]::IsNullOrWhiteSpace($user)) {
-            throw "No interactive user is logged on; set `$AnyDeskUser or create the ${AnyDeskTaskName} task in advance"
-        }
-
-        $action = New-ScheduledTaskAction -Execute $AnyDeskExe -WorkingDirectory $Dir
-        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-            -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-        Register-ScheduledTask -TaskName $AnyDeskTaskName -Action $action `
-            -Principal $principal -Settings $settings -Force | Out-Null
-    }
-    else {
-        $user = $task.Principal.UserId
-    }
-
-    Start-ScheduledTask -TaskName $AnyDeskTaskName
-
-    # Give AnyDesk time to initialize and catch a launcher that exits at once.
-    Start-Sleep -Seconds 2
-    $deadline = (Get-Date).AddSeconds(10)
-    while ((Get-Date) -lt $deadline) {
-        if ((Get-AnyDeskProcess).Count -gt 0) {
-            Write-Log "AnyDesk started in the interactive session of ${user}"
-            return
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    $info = Get-ScheduledTaskInfo -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
-    $result = if ($info) { $info.LastTaskResult } else { "unknown" }
-    throw "AnyDesk did not start (task result ${result}); check that a user is logged on"
-}
-
-function Stop-AnyDesk {
-    $running = @(Get-AnyDeskProcess)
-    if ($running.Count -gt 0) {
-        $running | Stop-Process -Force
-        Write-Log "AnyDesk stopped: flag is no longer -2"
-    }
-
-    # The one-shot task is recreated on the next -2, so do not leave it behind.
-    if (Get-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $AnyDeskTaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $AnyDeskTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    }
-}
-
 function Get-AnyDeskService {
-    Get-CimInstance Win32_Service -Filter "Name='$AnyDeskService'" -ErrorAction SilentlyContinue
+    Get-Service -Name $AnyDeskService -ErrorAction SilentlyContinue
 }
 
-function Get-AnyDeskServicePath {
-    param($Service)
-
-    if ([string]::IsNullOrWhiteSpace($Service.PathName)) {
-        return $null
-    }
-    if ($Service.PathName -match '^"([^"]+)"') {
-        return $matches[1]
-    }
-    return ($Service.PathName -split '\s+', 2)[0]
-}
-
-# True only for a service created from our source exe or our install dir.
-# A pre-existing AnyDesk installation elsewhere is never touched.
-function Test-AnyDeskOwnService {
-    param($Service)
-
-    $path = Get-AnyDeskServicePath $Service
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        return $false
-    }
-    if ($path -eq $AnyDeskExe) {
-        return $true
-    }
-
-    $prefix = $AnyDeskInstallDir.TrimEnd('\') + '\'
-    return $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
-}
-
-function Wait-AnyDeskService {
-    param(
-        [bool]$Present,
-        [int]$TimeoutSeconds = 30
-    )
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        $service = Get-AnyDeskService
-        if ($Present -and $service) {
-            return $service
-        }
-        if (-not $Present -and -not $service) {
-            return $null
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return (Get-AnyDeskService)
-}
-
-function Install-AnyDeskService {
+# -2: start the service even if it was disabled. A disabled service cannot be
+# started directly, so switch it to Manual first.
+function Start-AnyDeskService {
     $service = Get-AnyDeskService
-    if ($service -and -not (Test-AnyDeskOwnService $service)) {
-        return
-    }
-
     if (-not $service) {
-        if (-not (Test-Path $AnyDeskExe)) {
-            throw "AnyDesk installer not found: $AnyDeskExe"
-        }
-
-        $install = Start-Process -FilePath $AnyDeskExe `
-            -ArgumentList @('--install', $AnyDeskInstallDir, '--silent') `
-            -Wait -PassThru -WindowStyle Hidden
-        $service = Wait-AnyDeskService -Present $true
-        if (-not $service) {
-            throw "AnyDesk service did not appear after install (exit $($install.ExitCode))"
-        }
-        if (-not (Test-AnyDeskOwnService $service)) {
-            $path = Get-AnyDeskServicePath $service
-            throw "AnyDesk service appeared with unexpected path: $path"
-        }
-        Write-Log "AnyDesk service installed from $AnyDeskExe"
+        throw "AnyDesk service not found: $AnyDeskService"
     }
 
-    if ($service.StartMode -ne "Manual") {
+    if ($service.StartType -eq "Disabled") {
         Set-Service -Name $AnyDeskService -StartupType Manual
+        $service = Get-AnyDeskService
     }
-    if ($service.State -ne "Running") {
+
+    if ($service.Status -ne "Running") {
         Start-Service -Name $AnyDeskService
+
         $deadline = (Get-Date).AddSeconds(10)
-        do {
-            $service = Get-AnyDeskService
-            if ($service -and $service.State -eq "Running") {
+        while ((Get-Date) -lt $deadline) {
+            $service.Refresh()
+            if ($service.Status -eq "Running") {
                 break
             }
             Start-Sleep -Milliseconds 500
-        } while ((Get-Date) -lt $deadline)
-        if (-not $service -or $service.State -ne "Running") {
-            throw "AnyDesk service did not start"
+        }
+        if ($service.Status -ne "Running") {
+            throw "AnyDesk service did not start (status $($service.Status))"
         }
         Write-Log "AnyDesk service started"
     }
 }
 
-function Remove-AnyDeskService {
+# Every value except -2: stop and disable the service, wherever it is installed.
+function Disable-AnyDeskService {
     $service = Get-AnyDeskService
     if (-not $service) {
         return
     }
-    if (-not (Test-AnyDeskOwnService $service)) {
-        return
+
+    if ($service.Status -ne "Stopped") {
+        Stop-Service -Name $AnyDeskService -Force
+        Write-Log "AnyDesk service stopped"
     }
 
-    Stop-Service -Name $AnyDeskService -Force -ErrorAction SilentlyContinue
-    $uninstaller = if (Test-Path $AnyDeskInstalledExe) { $AnyDeskInstalledExe } else { $AnyDeskExe }
-    if (-not (Test-Path $uninstaller)) {
-        throw "AnyDesk uninstaller not found: $uninstaller"
+    if ($service.StartType -ne "Disabled") {
+        Set-Service -Name $AnyDeskService -StartupType Disabled
+        Write-Log "AnyDesk service disabled"
     }
-
-    Start-Process -FilePath $uninstaller -ArgumentList '--remove' `
-        -Wait -PassThru -WindowStyle Hidden | Out-Null
-
-    $service = Wait-AnyDeskService -Present $false
-    if ($service) {
-        throw "AnyDesk service is still registered after --remove"
-    }
-    Write-Log "AnyDesk service removed"
 }
 
 try {
@@ -339,7 +158,7 @@ try {
     }
 
     # Read the flag. If SSH fails, keep the previously saved value: a cached
-    # -1 keeps the VPN on, a cached -2 keeps AnyDesk running.
+    # -1 keeps the VPN on, a cached -2 keeps the AnyDesk service running.
     try {
         $reply = Invoke-Tool -File $Ssh -Arguments (
             '-F "{0}\ssh_config" vpn-trigger read-flag' -f $Dir
@@ -370,21 +189,14 @@ try {
         Write-Log "Flag read failed: $($_.Exception.Message)"
     }
 
-    # -2 and -3 are AnyDesk-only modes: do not touch a working VPN.
-    if ($flag -eq -3) {
-        Stop-AnyDesk
-        Install-AnyDeskService
-        exit 0
-    }
-
+    # -2 is the AnyDesk-only mode: do not touch a working VPN.
     if ($flag -eq -2) {
-        Remove-AnyDeskService
-        Start-AnyDesk
+        Start-AnyDeskService
         exit 0
     }
 
-    Remove-AnyDeskService
-    Stop-AnyDesk
+    # Every other value keeps AnyDesk off, wherever the service is installed.
+    Disable-AnyDeskService
 
     if (-not (Test-Path $VpnCmd)) {
         throw "vpncmd.exe not found: $VpnCmd"
