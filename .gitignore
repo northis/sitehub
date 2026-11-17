@@ -12,3 +12,4 @@ softether/logs/
 examples/test/*
 backup_all.log
 __pycache__/
+traefik/dynamic/vpn-sites.yml
