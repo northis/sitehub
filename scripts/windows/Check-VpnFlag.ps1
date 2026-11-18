@@ -26,6 +26,18 @@ $AnyDeskService = "AnyDesk"
 $StateFile = "$Dir\allowed-until.txt"
 $LogFile = "$Dir\watch.log"
 
+# SSH outage fallback: after 10 minutes without a readable flag, use -2.
+$FailureSinceFile = "$Dir\ssh-failure-since.txt"
+$EmergencyMarkerFile = "$Dir\ssh-emergency.active"
+$EmergencyAfterSeconds = 600
+
+# On an SSH timeout, ask AdGuard VPN (running as the logged-on user) to connect.
+$AdGuardLauncher = "C:\Program Files\AdGuardVpn\AdguardVpn.Launcher.exe"
+$AdGuardArgs = '/customProtocol "adguardvpn:connect_to_preferred"'
+$AdGuardTaskName = "SiteHub-AdGuardVpnConnect"
+$AdGuardLastAttemptFile = "$Dir\adguard-last-attempt.txt"
+$AdGuardRetrySeconds = 600
+
 function Write-Log {
     param([string]$Message)
 
@@ -86,6 +98,135 @@ function Invoke-Tool {
 
 function Get-AnyDeskService {
     Get-Service -Name $AnyDeskService -ErrorAction SilentlyContinue
+}
+
+# Tracks consecutive failed flag reads. Returns true once the outage has
+# lasted long enough to use the emergency -2 mode.
+function Update-SshFailure {
+    [long]$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    [long]$since = 0
+
+    if (Test-Path $FailureSinceFile) {
+        $raw = Get-Content $FailureSinceFile -Raw -ErrorAction SilentlyContinue
+        if ($raw -and $raw.Trim() -match '^[0-9]{1,11}$') {
+            $since = [long]$raw.Trim()
+        }
+    }
+    if ($since -le 0 -or $since -gt $now) {
+        $since = $now
+        [IO.File]::WriteAllText($FailureSinceFile, [string]$since)
+    }
+
+    $elapsed = $now - $since
+    if ($elapsed -lt $EmergencyAfterSeconds) {
+        return [pscustomobject]@{ Active = $false; JustStarted = $false }
+    }
+
+    $justStarted = $false
+    if (-not (Test-Path $EmergencyMarkerFile)) {
+        [IO.File]::WriteAllText($EmergencyMarkerFile, [string]$now)
+        $minutes = [math]::Floor($elapsed / 60)
+        Write-Log "SSH unavailable for $minutes minutes; using emergency -2"
+        $justStarted = $true
+    }
+    return [pscustomobject]@{ Active = $true; JustStarted = $justStarted }
+}
+
+# Called on a successful flag read. Returns true if the emergency was active,
+# so the caller can log the recovery once.
+function Clear-SshFailure {
+    $wasEmergency = Test-Path $EmergencyMarkerFile
+    Remove-Item $FailureSinceFile, $EmergencyMarkerFile -Force -ErrorAction SilentlyContinue
+    return $wasEmergency
+}
+
+# Win32_ComputerSystem reports the console session only; an RDP user is
+# visible through explorer.exe in their session.
+function Get-InteractiveUser {
+    $consoleUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if (-not [string]::IsNullOrWhiteSpace($consoleUser)) {
+        return $consoleUser
+    }
+
+    $shell = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.SessionId -ne 0 -and
+            -not [string]::IsNullOrWhiteSpace($_.UserName)
+        } |
+        Sort-Object SessionId -Descending |
+        Select-Object -First 1
+
+    if ($shell) {
+        return $shell.UserName
+    }
+
+    return $null
+}
+
+# Attempts at most once per AdGuardRetrySeconds. -Force is used when the
+# outage crosses into -2, so that transition also makes an attempt.
+function Start-AdGuardVpnConnect {
+    param([switch]$Force)
+
+    try {
+        [long]$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        [long]$last = 0
+
+        if (Test-Path $AdGuardLastAttemptFile) {
+            $raw = Get-Content $AdGuardLastAttemptFile -Raw -ErrorAction SilentlyContinue
+            if ($raw -and $raw.Trim() -match '^[0-9]{1,11}$') {
+                $last = [long]$raw.Trim()
+            }
+        }
+        if (-not $Force -and $last -gt 0 -and $last -le $now -and
+            ($now - $last) -lt $AdGuardRetrySeconds) {
+            return
+        }
+
+        # Record the attempt before trying, so a failed attempt also waits
+        # the full interval before the next one.
+        [IO.File]::WriteAllText($AdGuardLastAttemptFile, [string]$now)
+
+        if (-not (Test-Path $AdGuardLauncher)) {
+            Write-Log "AdGuard VPN launcher not found: $AdGuardLauncher"
+            return
+        }
+
+        $user = Get-InteractiveUser
+        if ([string]::IsNullOrWhiteSpace($user)) {
+            Write-Log "No interactive user is logged on; cannot run AdGuard VPN connect"
+            return
+        }
+
+        $action = New-ScheduledTaskAction -Execute $AdGuardLauncher `
+            -Argument $AdGuardArgs -WorkingDirectory (Split-Path $AdGuardLauncher)
+        $principal = New-ScheduledTaskPrincipal -UserId $user `
+            -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+        Register-ScheduledTask -TaskName $AdGuardTaskName -Action $action `
+            -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $AdGuardTaskName
+
+        Write-Log "AdGuard VPN connect requested in the session of $user"
+    }
+    catch {
+        Write-Log "AdGuard VPN connect failed: $($_.Exception.Message)"
+    }
+}
+
+# Called on a successful flag read to drop the one-shot task and its timer.
+function Clear-AdGuardConnect {
+    $wasRequested = Test-Path $AdGuardLastAttemptFile
+    Remove-Item $AdGuardLastAttemptFile -Force -ErrorAction SilentlyContinue
+
+    if (Get-ScheduledTask -TaskName $AdGuardTaskName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $AdGuardTaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $AdGuardTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    return $wasRequested
 }
 
 # -2: start the service even if it was disabled. A disabled service cannot be
@@ -183,10 +324,26 @@ try {
 
         [IO.File]::WriteAllText("$StateFile.tmp", [string]$candidate)
         Move-Item "$StateFile.tmp" $StateFile -Force
+        if (Clear-SshFailure) {
+            Write-Log "SSH restored; using flag $candidate"
+        }
+        Clear-AdGuardConnect | Out-Null
         $flag = $candidate
     }
     catch {
-        Write-Log "Flag read failed: $($_.Exception.Message)"
+        $message = $_.Exception.Message
+        Write-Log "Flag read failed: $message"
+
+        $sshState = Update-SshFailure
+        if ($sshState.JustStarted) {
+            Start-AdGuardVpnConnect -Force
+        }
+        elseif ($sshState.Active -or $message -match 'timed out|timeout') {
+            Start-AdGuardVpnConnect
+        }
+        if ($sshState.Active) {
+            $flag = -2
+        }
     }
 
     # -2 is the AnyDesk-only mode: do not touch a working VPN.
