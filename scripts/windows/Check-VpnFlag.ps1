@@ -35,6 +35,8 @@ $EmergencyAfterSeconds = 600
 $AdGuardLauncher = "C:\Program Files\AdGuardVpn\AdguardVpn.Launcher.exe"
 $AdGuardArgs = '/customProtocol "adguardvpn:connect_to_preferred"'
 $AdGuardTaskName = "SiteHub-AdGuardVpnConnect"
+$AdGuardLaunchTaskName = "SiteHub-AdGuardVpnLaunch"
+$AdGuardLaunchDelaySeconds = 10
 $AdGuardLastAttemptFile = "$Dir\adguard-last-attempt.txt"
 $AdGuardRetrySeconds = 600
 
@@ -163,6 +165,34 @@ function Get-InteractiveUser {
     return $null
 }
 
+# Starts an AdGuard launcher task in the interactive session of User.
+function Start-AdGuardTask {
+    param(
+        [string]$Name,
+        [string]$Argument,
+        [string]$User
+    )
+
+    $actionParams = @{
+        Execute = $AdGuardLauncher
+        WorkingDirectory = (Split-Path $AdGuardLauncher)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Argument)) {
+        $actionParams.Argument = $Argument
+    }
+
+    $action = New-ScheduledTaskAction @actionParams
+    $principal = New-ScheduledTaskPrincipal -UserId $User `
+        -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    Register-ScheduledTask -TaskName $Name -Action $action `
+        -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $Name
+}
+
 # Attempts at most once per AdGuardRetrySeconds. -Force is used when the
 # outage crosses into -2, so that transition also makes an attempt.
 function Start-AdGuardVpnConnect {
@@ -194,22 +224,20 @@ function Start-AdGuardVpnConnect {
 
         $user = Get-InteractiveUser
         if ([string]::IsNullOrWhiteSpace($user)) {
-            Write-Log "No interactive user is logged on; cannot run AdGuard VPN connect"
+            Write-Log "No interactive user is logged on; starting AdGuard VPN as SYSTEM"
+            Start-Process -FilePath $AdGuardLauncher `
+                -WorkingDirectory (Split-Path $AdGuardLauncher) | Out-Null
+            Start-Sleep -Seconds $AdGuardLaunchDelaySeconds
+            Start-Process -FilePath $AdGuardLauncher -ArgumentList $AdGuardArgs `
+                -WorkingDirectory (Split-Path $AdGuardLauncher) | Out-Null
+            Write-Log "AdGuard VPN connect requested as SYSTEM"
             return
         }
 
-        $action = New-ScheduledTaskAction -Execute $AdGuardLauncher `
-            -Argument $AdGuardArgs -WorkingDirectory (Split-Path $AdGuardLauncher)
-        $principal = New-ScheduledTaskPrincipal -UserId $user `
-            -LogonType Interactive -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-            -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-        Register-ScheduledTask -TaskName $AdGuardTaskName -Action $action `
-            -Principal $principal -Settings $settings -Force | Out-Null
-        Start-ScheduledTask -TaskName $AdGuardTaskName
-
+        Start-AdGuardTask -Name $AdGuardLaunchTaskName -Argument "" -User $user
+        Write-Log "AdGuard VPN launcher started in the session of $user; connect in $AdGuardLaunchDelaySeconds s"
+        Start-Sleep -Seconds $AdGuardLaunchDelaySeconds
+        Start-AdGuardTask -Name $AdGuardTaskName -Argument $AdGuardArgs -User $user
         Write-Log "AdGuard VPN connect requested in the session of $user"
     }
     catch {
@@ -217,14 +245,16 @@ function Start-AdGuardVpnConnect {
     }
 }
 
-# Called on a successful flag read to drop the one-shot task and its timer.
+# Called on a successful flag read to drop the one-shot tasks and their timer.
 function Clear-AdGuardConnect {
     $wasRequested = Test-Path $AdGuardLastAttemptFile
     Remove-Item $AdGuardLastAttemptFile -Force -ErrorAction SilentlyContinue
 
-    if (Get-ScheduledTask -TaskName $AdGuardTaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $AdGuardTaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $AdGuardTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    foreach ($taskName in @($AdGuardLaunchTaskName, $AdGuardTaskName)) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
     }
     return $wasRequested
 }
